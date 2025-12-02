@@ -179,7 +179,7 @@ def get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5, top_k_n
 # ----------------------------
 
 st.set_page_config(page_title="CF Recommender (Robust)", layout="centered")
-st.title("Collaborative Filtering Recommendation System (Robust for large data)")
+st.title("Collaborative Filtering Recommendation System (User_Based)")
 
 st.markdown("""
 Upload a CSV or Excel file with exactly three columns: **User ID, Product Name, Rating**.  

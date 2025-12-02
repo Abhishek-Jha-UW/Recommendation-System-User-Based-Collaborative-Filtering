@@ -1,4 +1,4 @@
-# cf_recommender_final.py
+# cf_recommender_final_v2.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -57,7 +57,6 @@ def prepare_matrices(df):
         'idx_to_prod': idx_to_prod,
         'rating_csr': rating_csr,
         'user_counts': user_counts,
-        'user_sums': user_sums,
         'user_means': user_means
     }
 
@@ -68,159 +67,125 @@ def build_nn_model(_rating_csr, algorithm='brute'):
     return nn
 
 # ----------------------------
-# Robust adaptive CF function
+# User-based CF prediction
 # ----------------------------
-def get_recommendations_user_based(user_idx,
-                                   data_dict,
-                                   nn_model,
-                                   top_n=5,
-                                   k_neighbors=50,
-                                   similarity_threshold=0.0,
-                                   max_k_expand=300):
+def predict_user_based(user_idx, prod_idx, data_dict, nn_model, top_k=100):
     rating_csr = data_dict['rating_csr']
     user_means = data_dict['user_means']
-    n_users, n_products = rating_csr.shape
+    n_users = rating_csr.shape[0]
 
-    def kneigh(kq):
-        kq = min(max(2, int(kq)), n_users)
-        distances, neighbors = nn_model.kneighbors(rating_csr[user_idx], n_neighbors=kq, return_distance=True)
-        return np.ravel(distances), np.ravel(neighbors)
+    # Users who rated this product
+    users_who_rated = rating_csr[:, prod_idx].nonzero()[0]
+    if len(users_who_rated) == 0:
+        return None
 
-    k_query = min(k_neighbors + 1, n_users)
-    distances, neighbors = kneigh(k_query)
+    # Query neighbors
+    k_query = min(n_users, top_k + 10)
+    distances, neighbors = nn_model.kneighbors(rating_csr[user_idx], n_neighbors=k_query, return_distance=True)
+    distances = np.ravel(distances)
+    neighbors = np.ravel(neighbors)
+
+    # Remove self
     mask_self = neighbors != user_idx
     neighbors = neighbors[mask_self]
     distances = distances[mask_self]
 
-    if neighbors.size == 0:
-        return []
+    if len(neighbors) == 0:
+        return None
 
     sims = 1.0 - distances
-    good_mask = sims >= similarity_threshold
-    neighbors = neighbors[good_mask]
-    sims = sims[good_mask]
 
-    if neighbors.size == 0:
-        distances, neighbors = kneigh(k_query)
-        mask_self = neighbors != user_idx
-        neighbors = neighbors[mask_self]
-        distances = distances[mask_self]
-        sims = 1.0 - distances
+    # Only consider neighbors who rated the product
+    mask_rated = np.isin(neighbors, users_who_rated)
+    neighbors = neighbors[mask_rated]
+    sims = sims[mask_rated]
 
-    if neighbors.size == 0:
-        return []
+    if len(neighbors) == 0:
+        return None
 
-    if neighbors.size > k_neighbors:
-        sorted_idx = np.argsort(sims)[-k_neighbors:]
-        neighbors = neighbors[sorted_idx]
-        sims = sims[sorted_idx]
+    neighbor_ratings = rating_csr[neighbors, prod_idx].toarray().ravel()
+    neighbor_means = user_means[neighbors]
+    ratings_diff = neighbor_ratings - neighbor_means
 
-    neighbor_dense = rating_csr[neighbors].toarray()
-    neighbor_means = data_dict['user_means'][neighbors]
-    deviations = neighbor_dense - neighbor_means.reshape(-1, 1)
-    sims = np.maximum(sims, 0.0)
-    weights = sims.reshape(-1, 1)
-    weighted_dev = (deviations * weights).sum(axis=0)
-    rated_mask_by_neighbor = neighbor_dense != 0
-    denom = (rated_mask_by_neighbor * np.abs(weights)).sum(axis=0)
+    numerator = np.dot(sims, ratings_diff)
+    denominator = np.sum(np.abs(sims))
+    if denominator == 0:
+        return None
 
-    with np.errstate(divide='ignore', invalid='ignore'):
-        pred_dev = np.zeros_like(weighted_dev, dtype=float)
-        nonzero = denom > 0
-        pred_dev[nonzero] = weighted_dev[nonzero] / denom[nonzero]
+    prediction = user_means[user_idx] + (numerator / denominator)
+    # Clip prediction to observed min/max ratings
+    all_ratings = rating_csr.data
+    rmin, rmax = float(all_ratings.min()), float(all_ratings.max())
+    return float(np.clip(prediction, rmin, rmax))
 
-    target_user_mean = data_dict['user_means'][user_idx]
-    preds = target_user_mean + pred_dev
-
-    all_obs = data_dict['rating_csr'].data
-    if all_obs.size > 0:
-        rmin, rmax = float(all_obs.min()), float(all_obs.max())
-    else:
-        rmin, rmax = 1.0, 10.0
-    preds = np.clip(preds, rmin, rmax)
-
+def get_top_n_recommendations(user_idx, data_dict, nn_model, n=5, top_k=100):
+    rating_csr = data_dict['rating_csr']
     user_row = rating_csr[user_idx].toarray().ravel()
-    preds[user_row != 0] = -np.inf
-
-    top_idx = np.argsort(preds)[-top_n:][::-1]
-    top_idx = [int(i) for i in top_idx if preds[i] != -np.inf]
+    unrated_idx = np.where(user_row == 0)[0]
+    preds = {}
+    for p_idx in unrated_idx:
+        pred = predict_user_based(user_idx, p_idx, data_dict, nn_model, top_k)
+        if pred is not None:
+            preds[p_idx] = pred
+    top_idx = sorted(preds, key=preds.get, reverse=True)[:n]
     idx_to_prod = data_dict['idx_to_prod']
-    recs = [(idx_to_prod[i], float(round(preds[i], 4))) for i in top_idx]
-    return recs
+    return [(idx_to_prod[i], round(preds[i], 4)) for i in top_idx]
 
 # ----------------------------
 # Streamlit UI
 # ----------------------------
-st.set_page_config(page_title="CF Recommender (GitHub Sample)", layout="centered")
-st.title("Collaborative Filtering — User-Based (Robust)")
+st.set_page_config(page_title="User-Based CF Recommender", layout="centered")
+st.title("Collaborative Filtering — User-Based (Optimized)")
 
-st.markdown("This app uses your GitHub `games_sample.csv` by default, or you can upload your own CSV/XLSX file.")
-
-# Load GitHub sample by default
-with st.spinner("Loading GitHub sample CSV..."):
+# Load GitHub sample
+with st.spinner("Loading sample CSV from GitHub..."):
     try:
         df = load_sample_csv(GITHUB_RAW_SAMPLE)
-        st.success("Sample CSV loaded from GitHub.")
+        st.success("Sample CSV loaded.")
     except Exception as e:
-        st.error(f"Could not load sample CSV: {e}")
+        st.error(f"Cannot load sample CSV: {e}")
         st.stop()
 
 # Optional file upload
-uploaded_file = st.file_uploader("Or upload your own CSV/XLSX file:", type=["csv", "xlsx"])
+uploaded_file = st.file_uploader("Or upload your own CSV/XLSX file", type=["csv","xlsx"])
 if uploaded_file is not None:
-    try:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file, engine='openpyxl')
-        st.success("Uploaded file loaded.")
-    except Exception as e:
-        st.error(f"Failed to read uploaded file: {e}")
-        st.stop()
+    if uploaded_file.name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file, engine='openpyxl')
+    st.success("Uploaded file loaded.")
 
 # Validate
 if len(df.columns) != 3:
-    st.error("CSV must have exactly 3 columns: User ID, Product Name, Rating")
+    st.error("CSV must have 3 columns: User ID, Product Name, Rating")
     st.stop()
 df.columns = ['user_id', 'product_name', 'rating']
 
-with st.spinner("Preparing matrices and building KNN..."):
+# Prepare matrices
+with st.spinner("Preparing matrices and KNN model..."):
     data_dict = prepare_matrices(df)
-    rating_csr = data_dict['rating_csr']
-    nn_model = build_nn_model(rating_csr)
-    n_users, n_products = rating_csr.shape
-st.write(f"Users: {n_users} — Products: {n_products} — Ratings: {rating_csr.nnz}")
+    nn_model = build_nn_model(data_dict['rating_csr'])
+    n_users, n_products = data_dict['rating_csr'].shape
+st.write(f"Users: {n_users} — Products: {n_products} — Ratings: {data_dict['rating_csr'].nnz}")
 
-# Recommendation parameters
-st.subheader("Parameters")
-col1, col2, col3 = st.columns(3)
+# Parameters
+st.subheader("Recommendation Parameters")
+col1, col2 = st.columns(2)
 with col1:
-    top_n = st.number_input("Top-N", min_value=1, max_value=50, value=5)
+    top_n = st.number_input("Top-N recommendations", min_value=1, max_value=50, value=5)
 with col2:
-    k_neighbors = st.number_input("Initial K neighbors", min_value=5, max_value=500, value=50)
-with col3:
-    sim_thresh = st.slider("Min similarity threshold", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
+    top_k = st.number_input("Number of neighbors (K)", min_value=5, max_value=n_users, value=100)
 
+# Generate recommendations
 st.subheader("Generate Recommendations")
-user_list = list(data_dict['user_to_idx'].keys())
-target_user_id = st.selectbox("Select User ID:", user_list)
+target_user = st.selectbox("Select User ID:", list(data_dict['user_to_idx'].keys()))
 
-if st.button("Get Recommendations"):
-    with st.spinner("Generating recommendations..."):
-        user_idx = data_dict['user_to_idx'][str(target_user_id)]
-        recs = get_recommendations_user_based(
-            user_idx,
-            data_dict,
-            nn_model,
-            top_n=int(top_n),
-            k_neighbors=int(k_neighbors),
-            similarity_threshold=float(sim_thresh),
-            max_k_expand=300
-        )
-
+if st.button("Get Top Recommendations"):
+    user_idx = data_dict['user_to_idx'][str(target_user)]
+    recs = get_top_n_recommendations(user_idx, data_dict, nn_model, n=int(top_n), top_k=int(top_k))
     if recs:
-        rec_df = pd.DataFrame(recs, columns=['Product Name', 'Predicted Rating'])
-        st.write(f"### Top {top_n} recommendations for {target_user_id}")
+        rec_df = pd.DataFrame(recs, columns=['Product Name','Predicted Rating'])
+        st.write(f"### Top {top_n} Recommendations for User {target_user}")
         st.table(rec_df)
     else:
         st.info("No recommendations could be generated for this user.")

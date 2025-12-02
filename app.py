@@ -2,11 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+import base64 # Required for download link
 
 # --- 1. Define Prediction and Recommendation Functions ---
 
 def predict_rating_user_based(user_id, product_name, ratings_matrix, user_similarity_df):
-    """Predicts a single rating using the Adjusted Weighted Sum formula."""
     user_avg_rating = ratings_matrix.loc[user_id].mean()
     game_ratings = ratings_matrix[product_name]
     rated_users_ids = game_ratings[game_ratings.notna()].index.tolist()
@@ -25,12 +25,9 @@ def predict_rating_user_based(user_id, product_name, ratings_matrix, user_simila
     else:
         prediction = user_avg_rating + (numerator / denominator)
         
-    # Clamp prediction to typical rating scale (e.g., 1 to 10 if that's the range)
-    # Adjust range if your ratings are 1-5, for example
     return np.clip(prediction, 1, 10) 
 
 def get_top_n_recommendations(user_id, ratings_matrix, user_similarity_df, n=5):
-    """Generates a list of the top N recommended products for a given user."""
     user_ratings = ratings_matrix.loc[user_id]
     unrated_products = user_ratings[pd.isna(user_ratings)].index.tolist()
     
@@ -38,17 +35,26 @@ def get_top_n_recommendations(user_id, ratings_matrix, user_similarity_df, n=5):
         return [("User has rated everything!", 0)]
 
     predictions = {}
-    # Iterate over unrated items and make a prediction for each
     for product in unrated_products:
         predicted_rating = predict_rating_user_based(user_id, product, ratings_matrix, user_similarity_df)
         predictions[product] = predicted_rating
         
-    # Sort predictions by rating in descending order
-    top_recommendations = sorted(predictions.items(), key=lambda item: item[1], reverse=True)
+    top_recommendations = sorted(predictions.items(), key=lambda item: item, reverse=True)
     
     return top_recommendations[:n]
 
-# --- 2. Streamlit UI Logic ---
+# --- 2. Helper function for download link (requires base64 import above) ---
+
+def get_table_download_link(df, filename="sample_games_data.csv", text="Download Sample Data CSV"):
+    """Generates a link allowing the data in a dataframe to be downloaded."""
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()  # some strings <-> bytes conversions necessary
+    return f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
+
+
+# --- 3. Streamlit UI Logic ---
+
+st.set_page_config(page_title="CF Recommender", layout="centered")
 
 st.title("Collaborative Filtering Recommendation System")
 
@@ -57,6 +63,18 @@ Upload your data file (CSV or Excel) with exactly three columns:
 **User ID, Product Name, and Rating.** 
 The app will build a User-Based Collaborative Filter and suggest the top 5 products!
 """)
+
+# Add the sample file section
+st.markdown("---")
+st.subheader("Try it out with a sample file:")
+# Replace the placeholder dataframe below with your actual sample data loaded locally first, or host it externally
+# If you have the data locally as a pandas df named 'sample_df', use this:
+# st.markdown(get_table_download_link(sample_df), unsafe_allow_html=True) 
+
+# Placeholder for the sample data link if you cannot load DF locally first
+st.markdown("If you upload `games_sample.csv` to GitHub, users can download it manually from your repo.", unsafe_allow_html=True)
+st.markdown("---")
+
 
 uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xlsx"])
 
@@ -67,7 +85,6 @@ if uploaded_file is not None:
         else:
             df = pd.read_excel(uploaded_file, engine='openpyxl')
         
-        # Validate and rename columns
         if len(df.columns) != 3:
              st.error("Please ensure your file has exactly 3 columns.")
         else:
@@ -76,22 +93,17 @@ if uploaded_file is not None:
             st.success("File successfully loaded and columns internally renamed.")
             st.dataframe(df.head())
 
-            # --- Data Processing ---
             st.subheader("Processing Data and Calculating Similarities...")
             
-            # Create User-Item Matrix
+            # --- Data Processing ---
             ratings_matrix = df.pivot_table(index='user_id', columns='product_name', values='rating')
-            
-            # Calculate User Similarity
             user_similarity = cosine_similarity(ratings_matrix.fillna(0))
             user_similarity_df = pd.DataFrame(user_similarity, index=ratings_matrix.index, columns=ratings_matrix.index)
             
             st.success(f"Matrix shape: {ratings_matrix.shape}. Similarity calculated.")
 
-            # --- Recommendation Interface ---
             st.subheader("Generate Recommendations")
             
-            # Dropdown for selecting a User ID
             target_user = st.selectbox(
                 "Select a User ID to generate recommendations for:",
                 options=ratings_matrix.index.tolist()
@@ -107,3 +119,7 @@ if uploaded_file is not None:
             
     except Exception as e:
         st.error(f"An error occurred during file processing or calculation: {e}")
+
+# --- 4. Add the Footer ---
+st.markdown("---")
+st.markdown("Made with 💗 by Abhishek Jha", unsafe_allow_html=True)

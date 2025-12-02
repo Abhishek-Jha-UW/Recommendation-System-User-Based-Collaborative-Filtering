@@ -2,57 +2,40 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-import base64 # Required for download link
+# base64 import is no longer needed with this approach
 
-# --- 1. Define Prediction and Recommendation Functions ---
+# --- 1. Define Prediction and Recommendation Functions (Same as before) ---
 
 def predict_rating_user_based(user_id, product_name, ratings_matrix, user_similarity_df):
     user_avg_rating = ratings_matrix.loc[user_id].mean()
     game_ratings = ratings_matrix[product_name]
     rated_users_ids = game_ratings[game_ratings.notna()].index.tolist()
-    
     if not rated_users_ids:
         return user_avg_rating 
-    
     similarities = user_similarity_df.loc[user_id, rated_users_ids]
     neighbors_avg_ratings = ratings_matrix.loc[rated_users_ids].mean(axis=1)
     ratings_diff = game_ratings[rated_users_ids] - neighbors_avg_ratings
     numerator = (similarities * ratings_diff).sum()
     denominator = similarities.abs().sum()
-    
     if denominator == 0:
         prediction = user_avg_rating
     else:
         prediction = user_avg_rating + (numerator / denominator)
-        
     return np.clip(prediction, 1, 10) 
 
 def get_top_n_recommendations(user_id, ratings_matrix, user_similarity_df, n=5):
     user_ratings = ratings_matrix.loc[user_id]
     unrated_products = user_ratings[pd.isna(user_ratings)].index.tolist()
-    
     if not unrated_products:
         return [("User has rated everything!", 0)]
-
     predictions = {}
     for product in unrated_products:
         predicted_rating = predict_rating_user_based(user_id, product, ratings_matrix, user_similarity_df)
         predictions[product] = predicted_rating
-        
     top_recommendations = sorted(predictions.items(), key=lambda item: item, reverse=True)
-    
     return top_recommendations[:n]
 
-# --- 2. Helper function for download link (requires base64 import above) ---
-
-def get_table_download_link(df, filename="sample_games_data.csv", text="Download Sample Data CSV"):
-    """Generates a link allowing the data in a dataframe to be downloaded."""
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()  # some strings <-> bytes conversions necessary
-    return f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
-
-
-# --- 3. Streamlit UI Logic ---
+# --- 2. Streamlit UI Logic ---
 
 st.set_page_config(page_title="CF Recommender", layout="centered")
 
@@ -64,15 +47,13 @@ Upload your data file (CSV or Excel) with exactly three columns:
 The app will build a User-Based Collaborative Filter and suggest the top 5 products!
 """)
 
-# Add the sample file section
 st.markdown("---")
 st.subheader("Try it out with a sample file:")
-# Replace the placeholder dataframe below with your actual sample data loaded locally first, or host it externally
-# If you have the data locally as a pandas df named 'sample_df', use this:
-# st.markdown(get_table_download_link(sample_df), unsafe_allow_html=True) 
 
-# Placeholder for the sample data link if you cannot load DF locally first
-st.markdown("If you upload `games_sample.csv` to GitHub, users can download it manually from your repo.", unsafe_allow_html=True)
+# This creates the download link by pointing directly to the raw file on GitHub
+github_csv_url = "raw.githubusercontent.com"
+st.markdown(f"Download the sample file here: [games_sample.csv]({github_csv_url})")
+
 st.markdown("---")
 
 
@@ -91,7 +72,7 @@ if uploaded_file is not None:
             df.columns = ['user_id', 'product_name', 'rating']
             
             st.success("File successfully loaded and columns internally renamed.")
-            st.dataframe(df.head())
+            # st.dataframe(df.head()) # Optional: display head of dataframe after upload
 
             st.subheader("Processing Data and Calculating Similarities...")
             

@@ -160,7 +160,7 @@ This version uses sparse matrices + KNN for better performance with large datase
 The app will automatically use a sample dataset from GitHub.
 """)
 
-st.markdown(---"")"
+st.markdown("---")
 
 # ----------------------------
 # Automatically load sample CSV from GitHub

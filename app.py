@@ -156,78 +156,59 @@ st.set_page_config(page_title="CF Recommender (Robust)", layout="centered")
 st.title("Collaborative Filtering Recommendation System")
 
 st.markdown("""
-Upload a CSV or Excel file with exactly three columns: **User ID, Product Name, Rating**.  
-This version uses sparse matrices + KNN for better performance with large datasets.
+This version uses sparse matrices + KNN for better performance with large datasets.  
+The app will automatically use a sample dataset from GitHub.
 """)
 
 st.markdown("---")
-st.subheader("Try it out with a sample file:")
 
-# ✅ Correct GitHub raw link for download
+# ----------------------------
+# Automatically load sample CSV from GitHub
+# ----------------------------
 github_csv_url = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
+df = pd.read_csv(github_csv_url)
+df.columns = ['user_id', 'product_name', 'rating']
+st.success("Sample dataset loaded from GitHub.")
 
-st.markdown(
-    f'Download the sample file here: <a href="{github_csv_url}" target="_blank">games_sample.csv</a>', 
-    unsafe_allow_html=True
+# ----------------------------
+# Prepare matrices and KNN model
+# ----------------------------
+with st.spinner("Preparing sparse matrices and KNN model..."):
+    data_dict = prepare_matrices(df)
+    rating_csr = data_dict['rating_csr']
+    
+    n_users, n_products = rating_csr.shape
+
+    if n_users < 2:
+        st.error("Need at least 2 distinct users in the data to run collaborative filtering.")
+        st.stop()
+
+    nn_model = build_nn_model(rating_csr)
+
+st.write(f"Users: {n_users} — Products: {n_products} — Ratings (non-zero): {rating_csr.nnz}")
+
+# ----------------------------
+# Generate Recommendations UI
+# ----------------------------
+st.subheader("Generate Recommendations")
+
+user_list = list(data_dict['user_to_idx'].keys())
+target_user_id = st.selectbox(
+    "Select a User ID to generate recommendations for:",
+    options=user_list
 )
-st.markdown("---")
 
-
-uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xlsx"])
-
-if uploaded_file is not None:
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
+if st.button("Get Top 5 Recommendations"):
+    with st.spinner(f"Generating recommendations for User {target_user_id}..."):
+        user_idx = data_dict['user_to_idx'][target_user_id]
+        recommendations = get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5)
+        
+        if recommendations:
+            st.write(f"### Top 5 Recommended Products for User {target_user_id}:")
+            rec_df = pd.DataFrame(recommendations, columns=['Product Name', 'Predicted Rating'])
+            st.table(rec_df)
         else:
-            df = pd.read_excel(uploaded_file, engine='openpyxl')
-
-        if len(df.columns) != 3:
-            st.error("Please ensure your file has exactly 3 columns (User ID, Product Name, Rating).")
-            st.stop()
-
-        df.columns = ['user_id', 'product_name', 'rating']
-        st.success("File loaded and processed.")
-
-        with st.spinner("Preparing sparse matrices and KNN model..."):
-            data_dict = prepare_matrices(df)
-            rating_csr = data_dict['rating_csr']
-            
-            n_users, n_products = rating_csr.shape
-
-            if n_users < 2:
-                st.error("Need at least 2 distinct users in the data to run collaborative filtering.")
-                st.stop()
-
-            nn_model = build_nn_model(rating_csr)
-
-        st.write(f"Users: {n_users} — Products: {n_products} — Ratings (non-zero): {rating_csr.nnz}")
-
-        # --- Generate Recommendations UI ---
-        st.subheader("Generate Recommendations")
-        
-        user_list = list(data_dict['user_to_idx'].keys())
-        target_user_id = st.selectbox(
-            "Select a User ID to generate recommendations for:",
-            options=user_list
-        )
-        
-        if st.button("Get Top 5 Recommendations"):
-            with st.spinner(f"Generating recommendations for User {target_user_id}..."):
-                user_idx = data_dict['user_to_idx'][target_user_id]
-                recommendations = get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5)
-                
-                if recommendations:
-                    st.write(f"### Top 5 Recommended Products for User {target_user_id}:")
-                    rec_df = pd.DataFrame(recommendations, columns=['Product Name', 'Predicted Rating'])
-                    st.table(rec_df)
-                else:
-                    st.info(f"No new recommendations could be generated for User {target_user_id}.")
-
-    except Exception as e:
-        st.error(f"An unexpected error occurred during file processing or calculation: {e}")
-        st.error("Please verify your file format is a standard CSV with commas.")
-
+            st.info(f"No new recommendations could be generated for User {target_user_id}.")
 
 # --- Footer ---
 st.markdown("---")

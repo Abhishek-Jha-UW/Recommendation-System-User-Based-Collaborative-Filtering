@@ -10,12 +10,18 @@ from sklearn.neighbors import NearestNeighbors
 
 @st.cache_data
 def prepare_matrices(df):
-    """Prepare sparse rating matrix and user/product mappings."""
+    """
+    Prepare sparse rating matrix and mappings from dataframe with columns:
+    user_id, product_name, rating
+    Returns a dict containing mappings and per-user stats.
+    """
     df = df.copy()
     df['user_id'] = df['user_id'].astype(str)
     df['product_name'] = df['product_name'].astype(str)
     df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
-    df = df.dropna(subset=['rating', 'user_id', 'product_name']).reset_index(drop=True)
+
+    df = df.dropna(subset=['rating', 'user_id', 'product_name'])
+    df = df.reset_index(drop=True)
 
     users = df['user_id'].unique().tolist()
     products = df['product_name'].unique().tolist()
@@ -29,11 +35,14 @@ def prepare_matrices(df):
     prod_idx = df['product_name'].map(prod_to_idx).to_numpy()
     ratings = df['rating'].to_numpy()
 
-    rating_csr = csr_matrix((ratings, (user_idx, prod_idx)), shape=(len(users), len(products)))
+    n_users = len(users)
+    n_prods = len(products)
+
+    rating_csr = csr_matrix((ratings, (user_idx, prod_idx)), shape=(n_users, n_prods))
 
     user_counts = np.diff(rating_csr.indptr)
     user_sums = np.asarray(rating_csr.sum(axis=1)).ravel()
-    user_means = np.zeros(len(users), dtype=float)
+    user_means = np.zeros(n_users, dtype=float)
     non_zero_mask = user_counts > 0
     user_means[non_zero_mask] = user_sums[non_zero_mask] / user_counts[non_zero_mask]
 
@@ -44,6 +53,7 @@ def prepare_matrices(df):
         'idx_to_prod': idx_to_prod,
         'rating_csr': rating_csr,
         'user_counts': user_counts,
+        'user_sums': user_sums,
         'user_means': user_means
     }
 
@@ -55,10 +65,10 @@ def build_nn_model(_rating_csr, algorithm='brute'):
     return nn
 
 # ----------------------------
-# Prediction logic
+# Prediction & recommendation logic
 # ----------------------------
 
-def predict_rating_user_based_sparse(user_idx, prod_idx, data_dict, nn_model, top_k=50, rating_min=1, rating_max=10):
+def predict_rating_user_based_sparse(user_idx, prod_idx, data_dict, nn_model, top_k=100, rating_min=1, rating_max=10):
     rating_csr = data_dict['rating_csr']
     user_means = data_dict['user_means']
 
@@ -70,9 +80,15 @@ def predict_rating_user_based_sparse(user_idx, prod_idx, data_dict, nn_model, to
         return None
 
     n_users = rating_csr.shape[0]
-    k_query = min(n_users, max(10, top_k + 5))
+    k_query = min(n_users, max(10, top_k + 10))
     
-    distances, neighbor_indices = nn_model.kneighbors(rating_csr[user_idx], n_neighbors=k_query, return_distance=True)
+    # Robust neighborhood query
+    try:
+        distances, neighbor_indices = nn_model.kneighbors(rating_csr[user_idx], n_neighbors=k_query, return_distance=True)
+    except Exception:
+        k_query = min(n_users, 10)
+        distances, neighbor_indices = nn_model.kneighbors(rating_csr[user_idx], n_neighbors=k_query, return_distance=True)
+
     distances = np.ravel(distances)
     neighbor_indices = np.ravel(neighbor_indices)
     neigh_sims = 1.0 - distances
@@ -82,7 +98,7 @@ def predict_rating_user_based_sparse(user_idx, prod_idx, data_dict, nn_model, to
     filtered_sims = neigh_sims[mask_rated]
 
     if filtered_neighbors.size == 0:
-        return None
+        return None # Cannot find a suitable neighbor overlap
 
     valid_mask = ~np.isnan(filtered_sims) & (np.abs(filtered_sims) > 1e-8)
     filtered_neighbors = filtered_neighbors[valid_mask]
@@ -105,14 +121,19 @@ def predict_rating_user_based_sparse(user_idx, prod_idx, data_dict, nn_model, to
     if denominator == 0:
         return None
 
-    prediction = user_means[user_idx] + (numerator / denominator)
-    return float(np.clip(prediction, rating_min, rating_max))
+    user_mean = user_means[user_idx]
+    prediction = user_mean + (numerator / denominator)
+    prediction = float(np.clip(prediction, rating_min, rating_max))
+    return prediction
 
-def get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5, top_k_neighbors=50):
+def get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5, top_k_neighbors=100):
     rating_csr = data_dict['rating_csr']
     user_row = rating_csr[user_idx]
     unrated_mask = (user_row.toarray().ravel() == 0)
     unrated_prod_idx = np.where(unrated_mask)[0].tolist()
+
+    if not unrated_prod_idx:
+        return []
 
     preds = {}
     for p_idx in unrated_prod_idx:
@@ -121,40 +142,33 @@ def get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5, top_k_n
             preds[p_idx] = pred
 
     top_items = sorted(preds.items(), key=lambda x: x[1], reverse=True)[:n]
+    
+    # Convert index predictions back to product names
     idx_to_prod = data_dict['idx_to_prod']
-    return [(idx_to_prod[idx], rating) for idx, rating in top_items]
+    named_recommendations = [(idx_to_prod[idx], rating) for idx, rating in top_items]
+    return named_recommendations
 
 # ----------------------------
 # Streamlit UI
 # ----------------------------
 
-st.set_page_config(page_title="CF Recommender", layout="centered")
-st.title("User-Based Collaborative Filtering Recommender")
+st.set_page_config(page_title="CF Recommender (Robust)", layout="centered")
+st.title("Collaborative Filtering Recommendation System")
 
 st.markdown("""
-The app uses sparse matrices + KNN for fast and accurate recommendations.  
-You can use the **default sample dataset** or upload your **own CSV/Excel** file.
+This version uses sparse matrices + KNN for better performance with large datasets.  
+The app will automatically use a sample dataset from GitHub.
 """)
 
-st.markdown("---")
+st.markdown(---"")"
 
 # ----------------------------
-# File selection: default GitHub sample or upload
+# Automatically load sample CSV from GitHub
 # ----------------------------
-
-uploaded_file = st.file_uploader("Upload your CSV/Excel file (Optional)", type=["csv", "xlsx"])
-if uploaded_file is not None:
-    if uploaded_file.name.endswith('.csv'):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file, engine='openpyxl')
-    st.success("Uploaded file loaded.")
-else:
-    github_csv_url = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
-    df = pd.read_csv(github_csv_url)
-    st.success("Sample dataset loaded from GitHub.")
-
+github_csv_url = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
+df = pd.read_csv(github_csv_url)
 df.columns = ['user_id', 'product_name', 'rating']
+st.success("Sample dataset loaded from GitHub.")
 
 # ----------------------------
 # Prepare matrices and KNN model
@@ -162,10 +176,11 @@ df.columns = ['user_id', 'product_name', 'rating']
 with st.spinner("Preparing sparse matrices and KNN model..."):
     data_dict = prepare_matrices(df)
     rating_csr = data_dict['rating_csr']
+    
     n_users, n_products = rating_csr.shape
 
     if n_users < 2:
-        st.error("Need at least 2 distinct users to run CF.")
+        st.error("Need at least 2 distinct users in the data to run collaborative filtering.")
         st.stop()
 
     nn_model = build_nn_model(rating_csr)
@@ -173,22 +188,28 @@ with st.spinner("Preparing sparse matrices and KNN model..."):
 st.write(f"Users: {n_users} — Products: {n_products} — Ratings (non-zero): {rating_csr.nnz}")
 
 # ----------------------------
-# Generate Recommendations
+# Generate Recommendations UI
 # ----------------------------
 st.subheader("Generate Recommendations")
+
 user_list = list(data_dict['user_to_idx'].keys())
-target_user_id = st.selectbox("Select a User ID to generate recommendations for:", options=user_list)
+target_user_id = st.selectbox(
+    "Select a User ID to generate recommendations for:",
+    options=user_list
+)
 
 if st.button("Get Top 5 Recommendations"):
     with st.spinner(f"Generating recommendations for User {target_user_id}..."):
         user_idx = data_dict['user_to_idx'][target_user_id]
         recommendations = get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5)
+        
         if recommendations:
-            rec_df = pd.DataFrame(recommendations, columns=['Product Name', 'Predicted Rating'])
             st.write(f"### Top 5 Recommended Products for User {target_user_id}:")
+            rec_df = pd.DataFrame(recommendations, columns=['Product Name', 'Predicted Rating'])
             st.table(rec_df)
         else:
-            st.info("No recommendations could be generated.")
+            st.info(f"No new recommendations could be generated for User {target_user_id}.")
 
+# --- Footer ---
 st.markdown("---")
 st.markdown("Made with 💗 by Abhishek Jha", unsafe_allow_html=True)

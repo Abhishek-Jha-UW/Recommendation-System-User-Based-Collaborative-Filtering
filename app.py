@@ -1,133 +1,275 @@
+# cf_recommender_streamlit_safe.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-import sys # Import sys for st.stop()
+from scipy.sparse import csr_matrix
+from sklearn.neighbors import NearestNeighbors
+import math
 
-# --- 1. Define Prediction Function (Simplified & Robust) ---
+# ----------------------------
+# Helper / cached functions
+# ----------------------------
 
-def predict_rating_user_based(user_id, product_name, ratings_matrix, user_similarity_df):
-    
-    # 1. Get neighbors who actually rated this product
-    game_ratings = ratings_matrix[product_name]
-    rated_users_ids = game_ratings[game_ratings.notna()].index
-    
-    # 2. If no neighbors rated it, return None
-    if rated_users_ids.empty or len(rated_users_ids) < 1:
-        return None 
-    
-    # 3. Get similarities and filter to only the relevant neighbors
-    similarities = user_similarity_df.loc[user_id, rated_users_ids]
-    
-    # 4. Handle cases where all relevant similarities are NaN or 0
-    if similarities.sum() == 0 or similarities.isnull().all():
+@st.cache_data
+def prepare_matrices(df):
+    """
+    Prepare mappings and sparse rating matrix from dataframe with columns:
+    user_id, product_name, rating
+    Returns:
+        user_to_idx, idx_to_user, prod_to_idx, idx_to_prod,
+        rating_csr (n_users x n_products), user_counts, user_sums, user_means
+    """
+    # Ensure correct dtypes
+    df = df.copy()
+    df['user_id'] = df['user_id'].astype(str)
+    df['product_name'] = df['product_name'].astype(str)
+    df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
+
+    # Build index mappings
+    users = df['user_id'].unique().tolist()
+    products = df['product_name'].unique().tolist()
+    user_to_idx = {u: i for i, u in enumerate(users)}
+    idx_to_user = {i: u for u, i in user_to_idx.items()}
+    prod_to_idx = {p: i for i, p in enumerate(products)}
+    idx_to_prod = {i: p for p, i in prod_to_idx.items()}
+
+    # Convert to indices
+    user_idx = df['user_id'].map(user_to_idx).to_numpy()
+    prod_idx = df['product_name'].map(prod_to_idx).to_numpy()
+    ratings = df['rating'].to_numpy()
+
+    # Create sparse matrix (rows: users, cols: products)
+    n_users = len(users)
+    n_prods = len(products)
+    rating_csr = csr_matrix((ratings, (user_idx, prod_idx)), shape=(n_users, n_prods))
+
+    # Per-user stats (only count non-zero entries)
+    user_counts = np.diff(rating_csr.indptr)  # number of non-zero entries per row
+    user_sums = rating_csr.sum(axis=1).A1  # sum per user
+    # Avoid division by zero
+    user_means = np.zeros(n_users, dtype=float)
+    non_zero_mask = user_counts > 0
+    user_means[non_zero_mask] = user_sums[non_zero_mask] / user_counts[non_zero_mask]
+
+    return {
+        'user_to_idx': user_to_idx,
+        'idx_to_user': idx_to_user,
+        'prod_to_idx': prod_to_idx,
+        'idx_to_prod': idx_to_prod,
+        'rating_csr': rating_csr,
+        'user_counts': user_counts,
+        'user_sums': user_sums,
+        'user_means': user_means
+    }
+
+@st.cache_resource
+def build_nn_model(rating_csr, algorithm='auto'):
+    """
+    Build and cache NearestNeighbors model on sparse ratings matrix.
+    We use cosine distance (distance = 1 - cosine_similarity).
+    """
+    # n_neighbors will be chosen at query time; here we only fit
+    nn = NearestNeighbors(metric='cosine', algorithm=algorithm, n_jobs=-1)
+    nn.fit(rating_csr)
+    return nn
+
+# ----------------------------
+# Prediction & recommendation logic
+# ----------------------------
+
+def predict_rating_user_based_sparse(user_idx, prod_idx, data_dict, nn_model, top_k=100, rating_min=1, rating_max=10):
+    """
+    Predict rating for user_idx on prod_idx using a nearest-neighbor strategy.
+    - user_idx: integer index for target user
+    - prod_idx: integer index for target product
+    - data_dict: output of prepare_matrices
+    - nn_model: fitted NearestNeighbors on rating_csr
+    - top_k: how many neighbors to consider (small constant; e.g., 50 or 100)
+    """
+    rating_csr = data_dict['rating_csr']
+    user_means = data_dict['user_means']
+
+    n_users = rating_csr.shape[0]
+    # If target user has no ratings, we cannot compute a mean-adjusted prediction
+    if data_dict['user_counts'][user_idx] == 0:
         return None
 
-    # 5. Calculate weighted prediction using vectorized operations
-    # Subtract neighbor's average from their specific rating for this item
-    neighbors_avg = ratings_matrix.loc[rated_users_ids].mean(axis=1)
-    ratings_diff = game_ratings[rated_users_ids] - neighbors_avg
-    
-    # Weight the difference by similarity score
-    numerator = (similarities * ratings_diff).sum()
-    denominator = similarities.abs().sum()
-    
-    # 6. Final prediction: Target user's average + weighted deviation
-    user_avg_rating = ratings_matrix.loc[user_id].mean()
-    prediction = user_avg_rating + (numerator / denominator)
-        
-    # Clamp rating between 1 and 10 (adjust this range if needed)
-    return np.clip(prediction, 1, 10) 
+    # Users who rated the product
+    users_who_rated = rating_csr[:, prod_idx].nonzero()[0]
+    if users_who_rated.size == 0:
+        return None
 
-# --- 2. Define Recommendation Function ---
+    # Query nearest neighbors for the target user (we'll get distances; convert to similarity)
+    # Request slightly more neighbors to increase chances some of them rated the item
+    k_query = min(n_users, max(10, top_k + 5))
+    distances, neighbor_indices = nn_model.kneighbors(rating_csr[user_idx], n_neighbors=k_query, return_distance=True)
+    distances = np.ravel(distances)
+    neighbor_indices = np.ravel(neighbor_indices)
 
-def get_top_n_recommendations(user_id, ratings_matrix, user_similarity_df, n=5):
-    user_ratings = ratings_matrix.loc[user_id]
-    unrated_products = user_ratings[pd.isna(user_ratings)].index.tolist()
-    
-    if not unrated_products:
-        return [] # Return empty list if everything is rated
+    # Convert distances to similarities (cosine distance -> similarity = 1 - distance)
+    neigh_sims = 1.0 - distances
 
-    predictions = {}
-    for product in unrated_products:
-        predicted_rating = predict_rating_user_based(user_id, product, ratings_matrix, user_similarity_df)
-        if predicted_rating is not None:
-             predictions[product] = predicted_rating
-        
-    top_recommendations = sorted(predictions.items(), key=lambda item: item[1], reverse=True)
-    
-    return top_recommendations[:n]
+    # Filter neighbors to those who rated the product
+    # We keep order and corresponding similarity
+    mask_rated = np.isin(neighbor_indices, users_who_rated)
+    filtered_neighbors = neighbor_indices[mask_rated]
+    filtered_sims = neigh_sims[mask_rated]
 
-# --- 3. Streamlit UI Logic ---
+    # If no neighbor among top_k rated the item, compute direct similarities only against users_who_rated (fallback)
+    if filtered_neighbors.size == 0:
+        # Compute similarity between target user vector and the users_who_rated set using sparse vector dot
+        # similarity = dot(u, v) / (||u|| * ||v||) but since we used cosine distance before, this matches that notion.
+        # We'll compute norms:
+        target_vec = rating_csr[user_idx]
+        # compute dot product with all users_who_rated at once:
+        rated_matrix = rating_csr[users_who_rated]  # small slice
+        dots = rated_matrix.dot(target_vec.T).A1  # dot products
+        # compute norms
+        # avoid zero norm users
+        target_norm = np.sqrt(target_vec.multiply(target_vec).sum())
+        rated_norms = np.sqrt(rated_matrix.multiply(rated_matrix).sum(axis=1)).A1
+        with np.errstate(divide='ignore', invalid='ignore'):
+            sims = np.zeros_like(dots, dtype=float)
+            valid = (target_norm > 0) & (rated_norms > 0)
+            if target_norm > 0:
+                sims[valid] = dots[valid] / (target_norm * rated_norms[valid])
+        filtered_neighbors = users_who_rated
+        filtered_sims = sims
 
-st.set_page_config(page_title="CF Recommender", layout="centered")
-st.title("Collaborative Filtering Recommendation System")
+    # Remove NaNs and near-zero similarities
+    valid_mask = ~np.isnan(filtered_sims) & (np.abs(filtered_sims) > 1e-8)
+    filtered_neighbors = filtered_neighbors[valid_mask]
+    filtered_sims = filtered_sims[valid_mask]
+
+    if filtered_neighbors.size == 0:
+        return None
+
+    # Optionally limit to top_k most similar neighbors
+    if filtered_neighbors.size > top_k:
+        top_k_idx = np.argsort(filtered_sims)[-top_k:]
+        filtered_neighbors = filtered_neighbors[top_k_idx]
+        filtered_sims = filtered_sims[top_k_idx]
+
+    # Fetch neighbor ratings for the product
+    # rating_csr[neighbor, prod_idx] -> returns a tiny dense array
+    neighbor_ratings = rating_csr[filtered_neighbors, prod_idx].A1
+    neighbor_means = data_dict['user_means'][filtered_neighbors]
+
+    # deviations (neighbor rating - neighbor mean)
+    ratings_diff = neighbor_ratings - neighbor_means
+
+    numerator = np.dot(filtered_sims, ratings_diff)
+    denominator = np.sum(np.abs(filtered_sims))
+
+    if denominator == 0:
+        return None
+
+    # target user mean
+    user_mean = user_means[user_idx]
+    prediction = user_mean + (numerator / denominator)
+
+    # clamp
+    prediction = float(np.clip(prediction, rating_min, rating_max))
+    return prediction
+
+def get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5, top_k_neighbors=100):
+    rating_csr = data_dict['rating_csr']
+    # Products not rated by user
+    user_row = rating_csr[user_idx]
+    unrated_mask = (user_row.toarray().ravel() == 0)  # zero indicates no explicit rating in this representation
+    # but note: if an actual rating of 0 exists in your dataset you should use sentinel. Here ratings assumed >=1.
+    unrated_prod_idx = np.where(unrated_mask)[0].tolist()
+
+    if not unrated_prod_idx:
+        return []
+
+    preds = {}
+    for p_idx in unrated_prod_idx:
+        pred = predict_rating_user_based_sparse(user_idx, p_idx, data_dict, nn_model, top_k=top_k_neighbors)
+        if pred is not None:
+            preds[p_idx] = pred
+
+    # sort and return top n as (product_index, predicted_rating)
+    top_items = sorted(preds.items(), key=lambda x: x[1], reverse=True)[:n]
+    return top_items
+
+# ----------------------------
+# Streamlit UI
+# ----------------------------
+
+st.set_page_config(page_title="CF Recommender (Robust)", layout="centered")
+st.title("Collaborative Filtering Recommendation System (Robust for large data)")
 
 st.markdown("""
-Upload your data file (CSV or Excel) with exactly three columns: 
-**User ID, Product Name, and Rating.** 
+Upload your data file (CSV or Excel) with **three columns**: **User ID, Product Name, Rating**.  
+This version uses sparse matrices and neighbor search to avoid high memory use.
 """)
-
-st.markdown("---")
-st.subheader("Try it out with a sample file:")
-github_csv_url = "raw.githubusercontent.com"
-st.markdown(
-    f'Download the sample file here: <a href="{github_csv_url}" target="_blank" download="games_sample.csv">games_sample.csv</a>', 
-    unsafe_allow_html=True
-)
-st.markdown("---")
 
 uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xlsx"])
 
 if uploaded_file is not None:
     try:
-        # Assumes standard comma-separated file format
+        # Load file
         if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file) 
+            df = pd.read_csv(uploaded_file)
         else:
             df = pd.read_excel(uploaded_file, engine='openpyxl')
-        
+
         if len(df.columns) != 3:
-             st.error("Please ensure your file has exactly 3 columns.")
-             st.stop()
-        else:
-            df.columns = ['user_id', 'product_name', 'rating']
-            st.success("File successfully loaded.")
-            
-            # --- Data Processing ---
-            ratings_matrix = df.pivot_table(index='user_id', columns='product_name', values='rating')
-            
-            if ratings_matrix.shape[0] < 2:
-                 st.error("Need at least 2 distinct users in the data to run collaborative filtering.")
-                 st.stop()
+            st.error("Please ensure your file has exactly 3 columns (User ID, Product Name, Rating).")
+            st.stop()
 
-            # Calculate Similarity
-            user_similarity = cosine_similarity(ratings_matrix.fillna(0))
-            user_similarity_df = pd.DataFrame(user_similarity, index=ratings_matrix.index, columns=ratings_matrix.index)
-            st.success(f"Matrix shape: {ratings_matrix.shape}. Similarity calculated.")
+        df.columns = ['user_id', 'product_name', 'rating']
+        st.success("File loaded.")
 
-            # --- Generate Recommendations UI ---
-            st.subheader("Generate Recommendations")
-            target_user = st.selectbox(
-                "Select a User ID to generate recommendations for:",
-                options=ratings_matrix.index.tolist()
-            )
-            
-            if st.button("Get Top 5 Recommendations"):
-                with st.spinner(f"Generating recommendations for User {target_user}..."):
-                    recommendations = get_top_n_recommendations(target_user, ratings_matrix, user_similarity_df, n=5)
-                    
-                    if recommendations:
-                        st.write(f"### Top 5 Recommended Products for User {target_user}:")
-                        rec_df = pd.DataFrame(recommendations, columns=['Product Name', 'Predicted Rating'])
-                        st.table(rec_df)
-                    else:
-                        st.info(f"No new recommendations could be generated for User {target_user}. (Might have rated everything or no overlapping neighbors found.)")
-            
+        # Prepare matrices (cached)
+        with st.spinner("Preparing data (sparse matrices)..."):
+            data_dict = prepare_matrices(df)
+
+        rating_csr = data_dict['rating_csr']
+        n_users, n_products = rating_csr.shape
+        st.write(f"Users: {n_users} — Products: {n_products} — Ratings (non-zero): {rating_csr.nnz}")
+
+        if n_users < 2:
+            st.error("Need at least 2 distinct users to run collaborative filtering.")
+            st.stop()
+
+        # Build or load NN model (cached)
+        with st.spinner("Building neighbor-search index..."):
+            nn_model = build_nn_model(rating_csr)
+
+        st.subheader("Generate Recommendations")
+        # Show dropdown of user IDs (string)
+        user_options = list(data_dict['user_to_idx'].keys())
+        target_user = st.selectbox("Select a User ID to generate recommendations for:", options=user_options)
+
+        # parameters
+        col1, col2 = st.columns(2)
+        with col1:
+            top_n = st.number_input("Top N recommendations", min_value=1, max_value=50, value=5)
+        with col2:
+            top_k_neighbors = st.number_input("Top-K neighbors to consider", min_value=5, max_value=500, value=100)
+
+        if st.button("Get Recommendations"):
+            user_idx = data_dict['user_to_idx'][str(target_user)]
+            with st.spinner("Generating recommendations..."):
+                recs = get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=top_n, top_k_neighbors=top_k_neighbors)
+
+            if recs:
+                # Convert to readable DF
+                rows = []
+                for pid, pred in recs:
+                    prod_name = data_dict['idx_to_prod'][pid]
+                    rows.append({'Product Name': prod_name, 'Predicted Rating': round(pred, 3)})
+                rec_df = pd.DataFrame(rows)
+                st.write(f"### Top {top_n} recommendations for user {target_user}:")
+                st.table(rec_df)
+            else:
+                st.info("No recommendations could be generated for this user. (Possibly user rated nothing, or no overlapping neighbors found.)")
+
     except Exception as e:
-        st.error(f"An unexpected error occurred during file processing or calculation: {e}")
-        st.error("Please verify your file format is a standard CSV with commas.")
+        st.error(f"An unexpected error occurred: {e}")
+        st.stop()
 
-# --- 4. Add the Footer ---
 st.markdown("---")
 st.markdown("Made with 💗 by Abhishek Jha", unsafe_allow_html=True)

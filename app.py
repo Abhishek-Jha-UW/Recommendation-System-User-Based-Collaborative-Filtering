@@ -237,8 +237,7 @@ This app uses sparse matrices + KNN and an adaptive, mean-adjusted scoring to pr
 
 st.markdown("---")
 st.subheader("Load sample CSV from GitHub (optional)")
-st.markdown("If you added `games_sample.csv` to your GitHub repo, paste the **raw** URL below. Example format:\n\n"
-            "`https://raw.githubusercontent.com/<username>/<repo>/main/games_sample.csv`")
+st.markdown("https://github.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/blob/main/games_sample.csv")
 
 github_raw_url = st.text_input("Paste raw.githubusercontent.com URL for sample CSV (optional):",
                               value="https://raw.githubusercontent.com/<username>/<repo>/main/games_sample.csv")

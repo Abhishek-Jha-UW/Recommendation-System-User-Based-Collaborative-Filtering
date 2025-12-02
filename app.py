@@ -53,7 +53,6 @@ st.subheader("Try it out with a sample file:")
 # URL points to the raw CSV file you uploaded
 github_csv_url = "raw.githubusercontent.com"
 
-# *** FIX: Added the 'download="games_sample.csv"' attribute to force download prompt ***
 st.markdown(
     f'Download the sample file here: <a href="{github_csv_url}" target="_blank" download="games_sample.csv">games_sample.csv</a>', 
     unsafe_allow_html=True
@@ -67,13 +66,18 @@ uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xls
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
+            # *** FIX IS HERE: Use sep='\s+' to read space-delimited files ***
+            df = pd.read_csv(uploaded_file, sep='\s+') 
         else:
+            # Excel files are read normally
             df = pd.read_excel(uploaded_file, engine='openpyxl')
         
+        # Validation code remains the same
         if len(df.columns) != 3:
              st.error("Please ensure your file has exactly 3 columns.")
+             st.stop() # Stop execution if columns are wrong
         else:
+            # Rename columns internally for consistency
             df.columns = ['user_id', 'product_name', 'rating']
             
             st.success("File successfully loaded and columns internally renamed.")
@@ -104,6 +108,7 @@ if uploaded_file is not None:
             
     except Exception as e:
         st.error(f"An error occurred during file processing or calculation: {e}")
+        st.error(f"Please check file format. Original error: {e}")
 
 # --- 4. Add the Footer ---
 st.markdown("---")

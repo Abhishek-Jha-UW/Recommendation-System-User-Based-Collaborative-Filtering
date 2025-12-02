@@ -50,9 +50,14 @@ The app will build a User-Based Collaborative Filter and suggest the top 5 produ
 st.markdown("---")
 st.subheader("Try it out with a sample file:")
 
-# This creates the download link by pointing directly to the raw file on GitHub
+# URL points to the raw CSV file you just uploaded
 github_csv_url = "raw.githubusercontent.com"
-st.markdown(f"Download the sample file here: [games_sample.csv]({github_csv_url})")
+
+# Updated markdown to open the link in a new tab (target="_blank") using HTML
+st.markdown(
+    f'Download the sample file here: <a href="{github_csv_url}" target="_blank">games_sample.csv</a>', 
+    unsafe_allow_html=True
+)
 
 st.markdown("---")
 
@@ -72,7 +77,6 @@ if uploaded_file is not None:
             df.columns = ['user_id', 'product_name', 'rating']
             
             st.success("File successfully loaded and columns internally renamed.")
-            # st.dataframe(df.head()) # Optional: display head of dataframe after upload
 
             st.subheader("Processing Data and Calculating Similarities...")
             

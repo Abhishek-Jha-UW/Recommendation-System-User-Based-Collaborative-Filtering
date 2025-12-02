@@ -160,7 +160,7 @@ Upload a CSV or Excel file with exactly three columns: **User ID, Product Name, 
 This version uses sparse matrices + KNN for better performance with large datasets.
 """)
 
-st.markdown(---"")"
+st.markdown(""---"")
 st.subheader("Try it out with a sample file:")
 github_csv_url = "raw.githubusercontent.com"
 st.markdown(

@@ -50,12 +50,12 @@ The app will build a User-Based Collaborative Filter and suggest the top 5 produ
 st.markdown("---")
 st.subheader("Try it out with a sample file:")
 
-# URL points to the raw CSV file you just uploaded
+# URL points to the raw CSV file you uploaded
 github_csv_url = "raw.githubusercontent.com"
 
-# Updated markdown to open the link in a new tab (target="_blank") using HTML
+# *** FIX: Added the 'download="games_sample.csv"' attribute to force download prompt ***
 st.markdown(
-    f'Download the sample file here: <a href="{github_csv_url}" target="_blank">games_sample.csv</a>', 
+    f'Download the sample file here: <a href="{github_csv_url}" target="_blank" download="games_sample.csv">games_sample.csv</a>', 
     unsafe_allow_html=True
 )
 

@@ -50,7 +50,7 @@ The app will build a User-Based Collaborative Filter and suggest the top 5 produ
 st.markdown("---")
 st.subheader("Try it out with a sample file:")
 
-# URL points to the raw CSV file you uploaded
+# URL points to the raw CSV file you uploaded (Ensure this file is comma-separated!)
 github_csv_url = "raw.githubusercontent.com"
 
 st.markdown(
@@ -66,18 +66,16 @@ uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xls
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
-            # *** FIX IS HERE: Use sep='\s+' to read space-delimited files ***
-            df = pd.read_csv(uploaded_file, sep='\s+') 
+            # *** FIX IS HERE: Reverted to default comma separator ***
+            df = pd.read_csv(uploaded_file) 
         else:
-            # Excel files are read normally
             df = pd.read_excel(uploaded_file, engine='openpyxl')
         
         # Validation code remains the same
         if len(df.columns) != 3:
              st.error("Please ensure your file has exactly 3 columns.")
-             st.stop() # Stop execution if columns are wrong
+             st.stop()
         else:
-            # Rename columns internally for consistency
             df.columns = ['user_id', 'product_name', 'rating']
             
             st.success("File successfully loaded and columns internally renamed.")
@@ -86,6 +84,12 @@ if uploaded_file is not None:
             
             # --- Data Processing ---
             ratings_matrix = df.pivot_table(index='user_id', columns='product_name', values='rating')
+
+            # Check if the matrix is empty before similarity calculation (prevents the 0,0 error)
+            if ratings_matrix.shape[0] == 0 or ratings_matrix.shape[1] == 0:
+                 st.error("The processed data is empty. Cannot calculate similarities.")
+                 st.stop()
+
             user_similarity = cosine_similarity(ratings_matrix.fillna(0))
             user_similarity_df = pd.DataFrame(user_similarity, index=ratings_matrix.index, columns=ratings_matrix.index)
             

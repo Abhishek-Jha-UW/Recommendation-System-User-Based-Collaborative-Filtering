@@ -63,14 +63,15 @@ def prepare_matrices(df):
     }
 
 @st.cache_resource
-def build_nn_model(rating_csr, algorithm='auto'):
+def build_nn_model(_rating_csr, algorithm='brute'):
     """
     Build and cache NearestNeighbors model on sparse ratings matrix.
-    We use cosine distance (distance = 1 - cosine_similarity).
+    Using 'brute' algorithm + cosine metric works well with sparse csr matrices.
+    The leading underscore in the parameter name tells Streamlit not to attempt to hash it.
     """
-    # n_neighbors will be chosen at query time; here we only fit
+    # Use cosine distance (1 - cosine_similarity)
     nn = NearestNeighbors(metric='cosine', algorithm=algorithm, n_jobs=-1)
-    nn.fit(rating_csr)
+    nn.fit(_rating_csr)
     return nn
 
 # ----------------------------

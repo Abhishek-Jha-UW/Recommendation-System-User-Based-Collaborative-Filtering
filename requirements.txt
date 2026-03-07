@@ -1,5 +1,6 @@
-streamlit
+mlxtend
 pandas
-scikit-learn
 numpy
-openpyxl
+scikit-learn
+scipy
+streamlit

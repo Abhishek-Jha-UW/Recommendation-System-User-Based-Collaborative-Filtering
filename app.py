@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from io import StringIO
 from model import (
     compute_user_similarity,
     recommend_user_based,
@@ -10,36 +9,27 @@ from model import (
     recommend_market_basket
 )
 
-# ---------------------------------------------------------
-# Streamlit Page Configuration
-# ---------------------------------------------------------
-st.set_page_config(
-    page_title="Recommendation System",
-    layout="wide"
-)
+st.set_page_config(page_title="Recommendation System", layout="wide")
 
 st.title("Recommendation System")
-st.markdown(
-    """
-This application supports three recommendation methods:
-- User-Based Collaborative Filtering  
-- Item-Based Collaborative Filtering  
-- Market Basket Analysis  
 
-You may upload your own dataset or use the provided sample dataset.
-"""
-)
+st.markdown("""
+Upload your dataset or use the sample dataset provided below.
+Supported methods:
+- User-Based Collaborative Filtering
+- Item-Based Collaborative Filtering
+- Market Basket Analysis
+""")
 
 # ---------------------------------------------------------
-# Sample Dataset
+# Sample dataset
 # ---------------------------------------------------------
-sample_data = pd.DataFrame({
+sample_df = pd.DataFrame({
     "user_id": ["U1", "U1", "U2", "U2", "U3", "U3"],
     "item_id": ["A", "B", "A", "C", "B", "D"],
     "rating": [5, 3, 4, 2, 5, 4]
 })
 
-# Template CSV for download
 template_csv = """user_id,item_id,rating
 U1,A,5
 U1,B,3
@@ -50,39 +40,29 @@ U3,D,4
 """
 
 st.download_button(
-    label="Download Template CSV",
+    "Download Template CSV",
     data=template_csv,
-    file_name="recommendation_template.csv",
+    file_name="template.csv",
     mime="text/csv"
 )
 
-# ---------------------------------------------------------
-# Dataset Upload Section
-# ---------------------------------------------------------
-st.subheader("Upload Dataset")
+uploaded = st.file_uploader("Upload CSV", type=["csv"])
 
-uploaded_file = st.file_uploader(
-    "Upload a CSV file with columns: user_id, item_id, rating",
-    type=["csv"]
-)
-
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    st.success("Dataset uploaded successfully.")
+if uploaded:
+    df = pd.read_csv(uploaded)
+    st.success("Dataset uploaded.")
 else:
+    df = sample_df.copy()
     st.info("Using sample dataset.")
-    df = sample_data.copy()
 
-st.write("Preview of dataset:")
+st.write("Preview:")
 st.dataframe(df.head())
 
 # ---------------------------------------------------------
-# Method Selection
+# Method selection
 # ---------------------------------------------------------
-st.subheader("Select Recommendation Method")
-
 method = st.selectbox(
-    "Choose a method:",
+    "Select Recommendation Method",
     ["User-Based Collaborative Filtering", "Item-Based Collaborative Filtering", "Market Basket Analysis"]
 )
 
@@ -90,90 +70,40 @@ method = st.selectbox(
 # USER-BASED CF
 # ---------------------------------------------------------
 if method == "User-Based Collaborative Filtering":
-    st.subheader("User-Based Collaborative Filtering")
+    user_item, sim_df = compute_user_similarity(df)
+    users = list(user_item.index)
 
-    try:
-        user_item_matrix, similarity_df = compute_user_similarity(df)
+    selected_user = st.selectbox("Select User", users)
 
-        user_list = list(user_item_matrix.index)
-        selected_user = st.selectbox("Select User:", user_list)
-
-        if st.button("Generate Recommendations"):
-            recs = recommend_user_based(
-                user_id=selected_user,
-                user_item_matrix=user_item_matrix,
-                similarity_df=similarity_df,
-                k=5
-            )
-
-            if recs:
-                st.write("Top Recommendations:")
-                st.table(pd.DataFrame({"Recommended Items": recs}))
-            else:
-                st.info("No recommendations available for this user.")
-
-    except Exception as e:
-        st.error(f"Error: {e}")
+    if st.button("Generate Recommendations"):
+        recs = recommend_user_based(selected_user, user_item, sim_df, k=5)
+        st.write("Recommendations:")
+        st.table(pd.DataFrame({"Recommended Items": recs}))
 
 # ---------------------------------------------------------
 # ITEM-BASED CF
 # ---------------------------------------------------------
 elif method == "Item-Based Collaborative Filtering":
-    st.subheader("Item-Based Collaborative Filtering")
+    user_item, sim_df = compute_item_similarity(df)
+    users = list(user_item.index)
 
-    try:
-        user_item_matrix, item_similarity_df = compute_item_similarity(df)
+    selected_user = st.selectbox("Select User", users)
 
-        user_list = list(user_item_matrix.index)
-        selected_user = st.selectbox("Select User:", user_list)
-
-        if st.button("Generate Recommendations"):
-            recs = recommend_item_based(
-                user_id=selected_user,
-                user_item_matrix=user_item_matrix,
-                item_similarity_df=item_similarity_df,
-                k=5
-            )
-
-            if recs:
-                st.write("Top Recommendations:")
-                st.table(pd.DataFrame({"Recommended Items": recs}))
-            else:
-                st.info("No recommendations available for this user.")
-
-    except Exception as e:
-        st.error(f"Error: {e}")
+    if st.button("Generate Recommendations"):
+        recs = recommend_item_based(selected_user, user_item, sim_df, k=5)
+        st.write("Recommendations:")
+        st.table(pd.DataFrame({"Recommended Items": recs}))
 
 # ---------------------------------------------------------
-# MARKET BASKET ANALYSIS
+# MARKET BASKET
 # ---------------------------------------------------------
-elif method == "Market Basket Analysis":
-    st.subheader("Market Basket Analysis")
+else:
+    rules = run_market_basket(df)
+    items = sorted(df["item_id"].unique())
 
-    try:
-        rules = run_market_basket(df)
+    selected_item = st.selectbox("Select Item", items)
 
-        unique_items = sorted(df["item_id"].unique())
-        selected_item = st.selectbox("Select an Item:", unique_items)
-
-        if st.button("Generate Recommendations"):
-            recs = recommend_market_basket(
-                item=selected_item,
-                rules_df=rules,
-                k=5
-            )
-
-            if recs:
-                st.write("Associated Items:")
-                st.table(pd.DataFrame({"Recommended Items": recs}))
-            else:
-                st.info("No associated items found for this selection.")
-
-    except Exception as e:
-        st.error(f"Error: {e}")
-
-# ---------------------------------------------------------
-# Footer
-# ---------------------------------------------------------
-st.markdown("---")
-st.caption("Developed by Abhishek Jha")
+    if st.button("Generate Associated Items"):
+        recs = recommend_market_basket(selected_item, rules, k=5)
+        st.write("Associated Items:")
+        st.table(pd.DataFrame({"Recommended Items": recs}))

@@ -1,215 +1,179 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-from scipy.sparse import csr_matrix
-from sklearn.neighbors import NearestNeighbors
-
-# ----------------------------
-# Cached helpers
-# ----------------------------
-
-@st.cache_data
-def prepare_matrices(df):
-    """
-    Prepare sparse rating matrix and mappings from dataframe with columns:
-    user_id, product_name, rating
-    Returns a dict containing mappings and per-user stats.
-    """
-    df = df.copy()
-    df['user_id'] = df['user_id'].astype(str)
-    df['product_name'] = df['product_name'].astype(str)
-    df['rating'] = pd.to_numeric(df['rating'], errors='coerce')
-
-    df = df.dropna(subset=['rating', 'user_id', 'product_name'])
-    df = df.reset_index(drop=True)
-
-    users = df['user_id'].unique().tolist()
-    products = df['product_name'].unique().tolist()
-
-    user_to_idx = {u: i for i, u in enumerate(users)}
-    idx_to_user = {i: u for u, i in user_to_idx.items()}
-    prod_to_idx = {p: i for i, p in enumerate(products)}
-    idx_to_prod = {i: p for p, i in prod_to_idx.items()}
-
-    user_idx = df['user_id'].map(user_to_idx).to_numpy()
-    prod_idx = df['product_name'].map(prod_to_idx).to_numpy()
-    ratings = df['rating'].to_numpy()
-
-    n_users = len(users)
-    n_prods = len(products)
-
-    rating_csr = csr_matrix((ratings, (user_idx, prod_idx)), shape=(n_users, n_prods))
-
-    user_counts = np.diff(rating_csr.indptr)
-    user_sums = np.asarray(rating_csr.sum(axis=1)).ravel()
-    user_means = np.zeros(n_users, dtype=float)
-    non_zero_mask = user_counts > 0
-    user_means[non_zero_mask] = user_sums[non_zero_mask] / user_counts[non_zero_mask]
-
-    return {
-        'user_to_idx': user_to_idx,
-        'idx_to_user': idx_to_user,
-        'prod_to_idx': prod_to_idx,
-        'idx_to_prod': idx_to_prod,
-        'rating_csr': rating_csr,
-        'user_counts': user_counts,
-        'user_sums': user_sums,
-        'user_means': user_means
-    }
-
-@st.cache_resource
-def build_nn_model(_rating_csr, algorithm='brute'):
-    """Build and cache a NearestNeighbors model."""
-    nn = NearestNeighbors(metric='cosine', algorithm=algorithm, n_jobs=-1)
-    nn.fit(_rating_csr)
-    return nn
-
-# ----------------------------
-# Prediction & recommendation logic
-# ----------------------------
-
-def predict_rating_user_based_sparse(user_idx, prod_idx, data_dict, nn_model, top_k=100, rating_min=1, rating_max=10):
-    rating_csr = data_dict['rating_csr']
-    user_means = data_dict['user_means']
-
-    if data_dict['user_counts'][user_idx] == 0:
-        return None
-
-    users_who_rated = rating_csr[:, prod_idx].nonzero()[0]
-    if users_who_rated.size == 0:
-        return None
-
-    n_users = rating_csr.shape[0]
-    k_query = min(n_users, max(10, top_k + 10))
-    
-    # Robust neighborhood query
-    try:
-        distances, neighbor_indices = nn_model.kneighbors(rating_csr[user_idx], n_neighbors=k_query, return_distance=True)
-    except Exception:
-        k_query = min(n_users, 10)
-        distances, neighbor_indices = nn_model.kneighbors(rating_csr[user_idx], n_neighbors=k_query, return_distance=True)
-
-    distances = np.ravel(distances)
-    neighbor_indices = np.ravel(neighbor_indices)
-    neigh_sims = 1.0 - distances
-
-    mask_rated = np.isin(neighbor_indices, users_who_rated)
-    filtered_neighbors = neighbor_indices[mask_rated]
-    filtered_sims = neigh_sims[mask_rated]
-
-    if filtered_neighbors.size == 0:
-        return None # Cannot find a suitable neighbor overlap
-
-    valid_mask = ~np.isnan(filtered_sims) & (np.abs(filtered_sims) > 1e-8)
-    filtered_neighbors = filtered_neighbors[valid_mask]
-    filtered_sims = filtered_sims[valid_mask]
-
-    if filtered_neighbors.size == 0:
-        return None
-
-    if filtered_neighbors.size > top_k:
-        top_k_idx = np.argsort(filtered_sims)[-top_k:]
-        filtered_neighbors = filtered_neighbors[top_k_idx]
-        filtered_sims = filtered_sims[top_k_idx]
-
-    neighbor_ratings = rating_csr[filtered_neighbors, prod_idx].toarray().ravel()
-    neighbor_means = data_dict['user_means'][filtered_neighbors]
-    ratings_diff = neighbor_ratings - neighbor_means
-
-    numerator = np.dot(filtered_sims, ratings_diff)
-    denominator = np.sum(np.abs(filtered_sims))
-    if denominator == 0:
-        return None
-
-    user_mean = user_means[user_idx]
-    prediction = user_mean + (numerator / denominator)
-    prediction = float(np.clip(prediction, rating_min, rating_max))
-    return prediction
-
-def get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5, top_k_neighbors=100):
-    rating_csr = data_dict['rating_csr']
-    user_row = rating_csr[user_idx]
-    unrated_mask = (user_row.toarray().ravel() == 0)
-    unrated_prod_idx = np.where(unrated_mask)[0].tolist()
-
-    if not unrated_prod_idx:
-        return []
-
-    preds = {}
-    for p_idx in unrated_prod_idx:
-        pred = predict_rating_user_based_sparse(user_idx, p_idx, data_dict, nn_model, top_k=top_k_neighbors)
-        if pred is not None:
-            preds[p_idx] = pred
-
-    top_items = sorted(preds.items(), key=lambda x: x[1], reverse=True)[:n]
-    
-    # Convert index predictions back to product names
-    idx_to_prod = data_dict['idx_to_prod']
-    named_recommendations = [(idx_to_prod[idx], rating) for idx, rating in top_items]
-    return named_recommendations
-
-# ----------------------------
-# Streamlit UI
-# ----------------------------
-
-st.set_page_config(page_title="CF Recommender (Robust)", layout="centered")
-st.title("Collaborative Filtering Recommendation System")
-
-st.markdown("""
-This version uses sparse matrices + KNN for better performance with large datasets.  
-The app will automatically use a sample dataset from GitHub.
-""")
-
-st.markdown("---")
-
-# ----------------------------
-# Automatically load sample CSV from GitHub
-# ----------------------------
-github_csv_url = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
-df = pd.read_csv(github_csv_url)
-df.columns = ['user_id', 'product_name', 'rating']
-st.success("Sample dataset loaded from GitHub.")
-
-# ----------------------------
-# Prepare matrices and KNN model
-# ----------------------------
-with st.spinner("Preparing sparse matrices and KNN model..."):
-    data_dict = prepare_matrices(df)
-    rating_csr = data_dict['rating_csr']
-    
-    n_users, n_products = rating_csr.shape
-
-    if n_users < 2:
-        st.error("Need at least 2 distinct users in the data to run collaborative filtering.")
-        st.stop()
-
-    nn_model = build_nn_model(rating_csr)
-
-st.write(f"Users: {n_users} — Products: {n_products} — Ratings (non-zero): {rating_csr.nnz}")
-
-# ----------------------------
-# Generate Recommendations UI
-# ----------------------------
-st.subheader("Generate Recommendations")
-
-user_list = list(data_dict['user_to_idx'].keys())
-target_user_id = st.selectbox(
-    "Select a User ID to generate recommendations for:",
-    options=user_list
+from io import StringIO
+from model import (
+    compute_user_similarity,
+    recommend_user_based,
+    compute_item_similarity,
+    recommend_item_based,
+    run_market_basket,
+    recommend_market_basket
 )
 
-if st.button("Get Top 5 Recommendations"):
-    with st.spinner(f"Generating recommendations for User {target_user_id}..."):
-        user_idx = data_dict['user_to_idx'][target_user_id]
-        recommendations = get_top_n_recommendations_sparse(user_idx, data_dict, nn_model, n=5)
-        
-        if recommendations:
-            st.write(f"### Top 5 Recommended Products for User {target_user_id}:")
-            rec_df = pd.DataFrame(recommendations, columns=['Product Name', 'Predicted Rating'])
-            st.table(rec_df)
-        else:
-            st.info(f"No new recommendations could be generated for User {target_user_id}.")
+# ---------------------------------------------------------
+# Streamlit Page Configuration
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="Recommendation System",
+    layout="wide"
+)
 
-# --- Footer ---
+st.title("Recommendation System")
+st.markdown(
+    """
+This application supports three recommendation methods:
+- User-Based Collaborative Filtering  
+- Item-Based Collaborative Filtering  
+- Market Basket Analysis  
+
+You may upload your own dataset or use the provided sample dataset.
+"""
+)
+
+# ---------------------------------------------------------
+# Sample Dataset
+# ---------------------------------------------------------
+sample_data = pd.DataFrame({
+    "user_id": ["U1", "U1", "U2", "U2", "U3", "U3"],
+    "item_id": ["A", "B", "A", "C", "B", "D"],
+    "rating": [5, 3, 4, 2, 5, 4]
+})
+
+# Template CSV for download
+template_csv = """user_id,item_id,rating
+U1,A,5
+U1,B,3
+U2,A,4
+U2,C,2
+U3,B,5
+U3,D,4
+"""
+
+st.download_button(
+    label="Download Template CSV",
+    data=template_csv,
+    file_name="recommendation_template.csv",
+    mime="text/csv"
+)
+
+# ---------------------------------------------------------
+# Dataset Upload Section
+# ---------------------------------------------------------
+st.subheader("Upload Dataset")
+
+uploaded_file = st.file_uploader(
+    "Upload a CSV file with columns: user_id, item_id, rating",
+    type=["csv"]
+)
+
+if uploaded_file:
+    df = pd.read_csv(uploaded_file)
+    st.success("Dataset uploaded successfully.")
+else:
+    st.info("Using sample dataset.")
+    df = sample_data.copy()
+
+st.write("Preview of dataset:")
+st.dataframe(df.head())
+
+# ---------------------------------------------------------
+# Method Selection
+# ---------------------------------------------------------
+st.subheader("Select Recommendation Method")
+
+method = st.selectbox(
+    "Choose a method:",
+    ["User-Based Collaborative Filtering", "Item-Based Collaborative Filtering", "Market Basket Analysis"]
+)
+
+# ---------------------------------------------------------
+# USER-BASED CF
+# ---------------------------------------------------------
+if method == "User-Based Collaborative Filtering":
+    st.subheader("User-Based Collaborative Filtering")
+
+    try:
+        user_item_matrix, similarity_df = compute_user_similarity(df)
+
+        user_list = list(user_item_matrix.index)
+        selected_user = st.selectbox("Select User:", user_list)
+
+        if st.button("Generate Recommendations"):
+            recs = recommend_user_based(
+                user_id=selected_user,
+                user_item_matrix=user_item_matrix,
+                similarity_df=similarity_df,
+                k=5
+            )
+
+            if recs:
+                st.write("Top Recommendations:")
+                st.table(pd.DataFrame({"Recommended Items": recs}))
+            else:
+                st.info("No recommendations available for this user.")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# ---------------------------------------------------------
+# ITEM-BASED CF
+# ---------------------------------------------------------
+elif method == "Item-Based Collaborative Filtering":
+    st.subheader("Item-Based Collaborative Filtering")
+
+    try:
+        user_item_matrix, item_similarity_df = compute_item_similarity(df)
+
+        user_list = list(user_item_matrix.index)
+        selected_user = st.selectbox("Select User:", user_list)
+
+        if st.button("Generate Recommendations"):
+            recs = recommend_item_based(
+                user_id=selected_user,
+                user_item_matrix=user_item_matrix,
+                item_similarity_df=item_similarity_df,
+                k=5
+            )
+
+            if recs:
+                st.write("Top Recommendations:")
+                st.table(pd.DataFrame({"Recommended Items": recs}))
+            else:
+                st.info("No recommendations available for this user.")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# ---------------------------------------------------------
+# MARKET BASKET ANALYSIS
+# ---------------------------------------------------------
+elif method == "Market Basket Analysis":
+    st.subheader("Market Basket Analysis")
+
+    try:
+        rules = run_market_basket(df)
+
+        unique_items = sorted(df["item_id"].unique())
+        selected_item = st.selectbox("Select an Item:", unique_items)
+
+        if st.button("Generate Recommendations"):
+            recs = recommend_market_basket(
+                item=selected_item,
+                rules_df=rules,
+                k=5
+            )
+
+            if recs:
+                st.write("Associated Items:")
+                st.table(pd.DataFrame({"Recommended Items": recs}))
+            else:
+                st.info("No associated items found for this selection.")
+
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+# ---------------------------------------------------------
+# Footer
+# ---------------------------------------------------------
 st.markdown("---")
-st.markdown("Made with 💗 by Abhishek Jha", unsafe_allow_html=True)
+st.caption("Developed by Abhishek Jha")

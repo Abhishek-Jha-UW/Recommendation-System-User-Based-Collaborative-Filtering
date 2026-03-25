@@ -1,82 +1,77 @@
 import streamlit as st
 import pandas as pd
-import urllib.request
+from model import RecommenderEngine
 import io
-import model  # Ensure model.py is in the same folder
 
-st.set_page_config(page_title="Game Recommender AI", layout="wide")
+# --- Page Setup ---
+st.set_page_config(page_title="AI Discovery Engine", layout="wide", page_icon="🚀")
 
-@st.cache_data
-def load_data(uploaded_file, url):
-    try:
-        if uploaded_file is not None:
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
+# --- Default Sample Data (Internal) ---
+def get_sample_data():
+    data = {
+        'user_id': ['User_A', 'User_A', 'User_B', 'User_C', 'User_C', 'User_D', 'User_E', 'User_E'],
+        'item_name': ['Elden Ring', 'Halo', 'Elden Ring', 'FIFA 24', 'Halo', 'Elden Ring', 'FIFA 24', 'Zelda'],
+        'rating': [5, 4, 5, 2, 5, 4, 5, 5]
+    }
+    return pd.DataFrame(data)
+
+# --- UI Header ---
+st.title("🚀 AI Product Recommender")
+st.markdown("Upload your data or use our **Sample Mode** to see the engine in action.")
+
+# --- Sidebar: Data Controls ---
+with st.sidebar:
+    st.header("1. Data Input")
+    mode = st.radio("Choose Data Source:", ["Use Sample Data", "Upload My Own"])
+    
+    if mode == "Upload My Own":
+        uploaded_file = st.file_uploader("Upload CSV", type="csv")
+        if uploaded_file:
+            df = pd.read_csv(uploaded_file)
         else:
-            # Adding a timeout and specific error handling for the URL
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = response.read()
-                df = pd.read_csv(io.BytesIO(data))
+            st.info("Awaiting file...")
+            st.stop()
+    else:
+        df = get_sample_data()
+        st.success("Loaded internal sample dataset.")
+
+    st.divider()
+    st.header("2. Get Template")
+    # Create template for user download
+    template_df = pd.DataFrame(columns=['user_id', 'item_id', 'rating'])
+    csv = template_df.to_csv(index=False).encode('utf-8')
+    st.download_button("Download CSV Template", data=csv, file_name="template.csv", mime="text/csv")
+
+# --- Main Logic ---
+engine = RecommenderEngine(df)
+engine.build_similarity()
+
+col1, col2 = st.columns([1, 2])
+
+with col1:
+    st.subheader("Configuration")
+    selected_user = st.selectbox("Select a User", df.iloc[:, 0].unique())
+    num_recs = st.number_input("Recommendations count", 1, 10, 3)
+    
+    with st.expander("View Training Data"):
+        st.dataframe(df, use_container_width=True)
+
+with col2:
+    st.subheader("Your Personalized Recommendations")
+    if st.button("Generate Predictions"):
+        recs = engine.get_user_recommendations(selected_user, n=num_recs)
         
-        # Take only the first 3 columns to avoid structure errors
-        df = df.iloc[:, :3] 
-        df.columns = ['user_id', 'item_id', 'rating']
-        return df
-    except urllib.error.HTTPError as e:
-        st.error(f"**GitHub Error {e.code}:** The file was not found at the URL provided. Please verify the link below.")
-        st.code(url)
-        return None
-    except Exception as e:
-        st.error(f"**Loading Error:** {e}")
-        return None
+        if not recs.empty:
+            # Create a nice display table
+            results_df = pd.DataFrame({
+                "Product/Item": recs.index,
+                "Match Score": [f"{round(val * 20, 1)}%" for val in recs.values] 
+            })
+            st.table(results_df)
+            st.balloons()
+        else:
+            st.warning("Not enough data for this specific user. Try a different user!")
 
-# --- Configuration ---
-st.title("🎯 Pro Recommendation Engine")
-st.sidebar.header("Data Settings")
-
-# CHECK THIS URL: Ensure 'main' is the correct branch name for your repo
-github_url = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
-
-uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
-
-df = load_data(uploaded_file, github_url)
-
-if df is not None:
-    # Build Pivot and Similarity
-    with st.spinner("Processing Data..."):
-        # Removing duplicates is critical for the .pivot() function to work
-        df_clean = df.drop_duplicates(subset=['user_id', 'item_id'])
-        pivot = df_clean.pivot(index='user_id', columns='item_id', values='rating')
-        user_sim = model.compute_similarity(pivot, target="user")
-
-    left_col, right_col = st.columns([1, 2])
-
-    with left_col:
-        st.subheader("User Selection")
-        user_id = st.selectbox("Select User ID:", pivot.index)
-        num_recs = st.slider("Number of results:", 1, 10, 5)
-        
-        history = df[df['user_id'] == user_id]
-        st.metric("Total User Ratings", len(history))
-        with st.expander("View Rated Items"):
-            st.dataframe(history[['item_id', 'rating']], use_container_width=True)
-
-    with right_col:
-        st.subheader("Top Recommendations")
-        if st.button("Generate Recommendations"):
-            with st.spinner("Calculating mathematical similarities..."):
-                recs = model.get_recommendations(user_id, pivot, user_sim, n=num_recs)
-                if recs:
-                    rec_df = pd.DataFrame(recs, columns=['Product Name', 'Predicted Rating'])
-                    # Visual styling for the table
-                    st.dataframe(rec_df.style.format({"Predicted Rating": "{:.2f}"}), use_container_width=True)
-                else:
-                    st.info("No items left to recommend (User may have rated everything).")
-else:
-    st.info("Waiting for data... If the GitHub link is failing, try uploading the CSV file manually in the sidebar.")
-
+# --- Footer ---
 st.divider()
-st.caption("Developed by Abhishek Jha | Build 2026.03")
+st.caption("Custom Engine built by Abhishek Jha | No External API required")

@@ -2,14 +2,14 @@ import streamlit as st
 import pandas as pd
 import urllib.request
 import io
-import model  # This imports your model.py file
+import model  # Ensure model.py is in the same folder
 
 # --- Page Config ---
 st.set_page_config(page_title="Game Recommender AI", layout="wide")
 
 @st.cache_data
 def load_data(uploaded_file, url):
-    """Loads data from upload or GitHub URL with custom headers."""
+    """Loads data from upload or GitHub URL."""
     try:
         if uploaded_file is not None:
             if uploaded_file.name.endswith('.csv'):
@@ -17,13 +17,16 @@ def load_data(uploaded_file, url):
             else:
                 df = pd.read_excel(uploaded_file)
         else:
-            # Bypass GitHub bot security with User-Agent header
+            # Revised Request block
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req) as response:
-                df = pd.read_csv(io.BytesIO(response.read()))
+                # Read the bytes and decode
+                data = response.read()
+                df = pd.read_csv(io.BytesIO(data))
         
-        # Standardize column names for the model
-        # Assumes format: User, Item, Rating
+        # Mapping columns: We assume the first 3 columns are User, Item, Rating
+        # This prevents errors if the CSV headers don't match exactly
+        df = df.iloc[:, :3] 
         df.columns = ['user_id', 'item_id', 'rating']
         return df
     except Exception as e:
@@ -34,26 +37,29 @@ def load_data(uploaded_file, url):
 st.title("🎯 Pro Recommendation Engine")
 st.sidebar.header("Data Settings")
 
+# IMPORTANT: Ensure this URL is exactly correct. 
+# Check if 'games_sample.csv' is in the main branch or a different one.
 github_url = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
+
 uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
 
 df = load_data(uploaded_file, github_url)
 
 if df is not None:
-    # 1. Prepare Data
+    # Build Pivot and Similarity
     with st.spinner("Building Similarity Matrix..."):
-        pivot = df.pivot_table(index='user_id', columns='item_id', values='rating')
+        # We drop duplicates to ensure pivot_table doesn't error out
+        df_clean = df.drop_duplicates(subset=['user_id', 'item_id'])
+        pivot = df_clean.pivot(index='user_id', columns='item_id', values='rating')
         user_sim = model.compute_similarity(pivot, target="user")
 
-    # 2. UI Layout
     left_col, right_col = st.columns([1, 2])
 
     with left_col:
         st.subheader("User Selection")
-        user_id = st.selectbox("Pick a User to Recommend For:", pivot.index)
+        user_id = st.selectbox("Pick a User:", pivot.index)
         num_recs = st.slider("Number of results:", 1, 10, 5)
         
-        # Show user stats
         history = df[df['user_id'] == user_id]
         st.metric("Items Rated", len(history))
         with st.expander("Show Rating History"):
@@ -61,19 +67,13 @@ if df is not None:
 
     with right_col:
         st.subheader("Top Picks for You")
-        if st.button(f"Generate Recommendations"):
-            with st.spinner("Analyzing neighbor preferences..."):
+        if st.button("Generate Recommendations"):
+            with st.spinner("Analyzing preferences..."):
                 recs = model.get_recommendations(user_id, pivot, user_sim, n=num_recs)
-                
                 if recs:
                     rec_df = pd.DataFrame(recs, columns=['Product Name', 'Predicted Rating'])
                     st.table(rec_df)
-                    st.success("Calculated based on similar user behavior.")
                 else:
-                    st.info("No new items found to recommend for this user.")
-
+                    st.info("No recommendations found.")
 else:
-    st.warning("Please upload a dataset or check your internet connection to load the default data.")
-
-st.markdown("---")
-st.caption("Developed by Abhishek Jha | Collaborative Filtering Engine v2.0")
+    st.warning("Could not reach the dataset. Please upload your own CSV file in the sidebar.")

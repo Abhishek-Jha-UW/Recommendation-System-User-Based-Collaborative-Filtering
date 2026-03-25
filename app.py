@@ -1,60 +1,79 @@
 import streamlit as st
 import pandas as pd
-import model  # Importing your engine logic
+import urllib.request
+import io
+import model  # This imports your model.py file
 
-# --- Configuration ---
-st.set_page_config(page_title="AI Recommender Pro", layout="wide")
+# --- Page Config ---
+st.set_page_config(page_title="Game Recommender AI", layout="wide")
 
 @st.cache_data
-def load_and_clean_data(file):
-    df = pd.read_csv(file) if file.name.endswith('.csv') else pd.read_excel(file)
-    # Ensure standard naming for the engine
-    df.columns = ['user_id', 'item_id', 'rating'] 
-    return df
-
-# --- Sidebar & File Loading ---
-st.sidebar.header("Settings")
-uploaded_file = st.sidebar.file_uploader("Upload Dataset", type=["csv", "xlsx"])
-
-# Use your GitHub URL as default if no file is uploaded
-DATA_URL = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
-raw_data = load_and_clean_data(uploaded_file) if uploaded_file else pd.read_csv(DATA_URL)
-
-# --- App Body ---
-st.title("🎯 Recommendation Engine")
-st.markdown("This system uses **User-User Collaborative Filtering** with mean-centering to predict what you'll love next.")
-
-# 1. Processing
-pivot = raw_data.pivot_table(index='user_id', columns='item_id', values='rating')
-user_sim = model.compute_similarity(pivot, target="user")
-
-# 2. UI Layout
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    st.subheader("Selection")
-    target_user = st.selectbox("Select User ID", pivot.index)
-    num_rec = st.slider("Number of recommendations", 1, 10, 5)
-    
-    user_history = raw_data[raw_data['user_id'] == target_user]
-    st.metric("Total Ratings by User", len(user_history))
-    with st.expander("View User History"):
-        st.dataframe(user_history[['item_id', 'rating']], use_container_width=True)
-
-with col2:
-    st.subheader("Top Recommendations")
-    if st.button(f"Generate for User {target_user}"):
-        with st.spinner("Calculating preferences..."):
-            recs = model.get_recommendations(target_user, pivot, user_sim, n=num_rec)
-            
-            if recs:
-                rec_df = pd.DataFrame(recs, columns=['Product Name', 'Predicted Score'])
-                st.table(rec_df)
-                
-                # Visual Feedback
-                st.success(f"Successfully generated {len(recs)} predictions.")
+def load_data(uploaded_file, url):
+    """Loads data from upload or GitHub URL with custom headers."""
+    try:
+        if uploaded_file is not None:
+            if uploaded_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file)
             else:
-                st.warning("Not enough data to generate unique recommendations for this user.")
+                df = pd.read_excel(uploaded_file)
+        else:
+            # Bypass GitHub bot security with User-Agent header
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response:
+                df = pd.read_csv(io.BytesIO(response.read()))
+        
+        # Standardize column names for the model
+        # Assumes format: User, Item, Rating
+        df.columns = ['user_id', 'item_id', 'rating']
+        return df
+    except Exception as e:
+        st.error(f"Failed to load data: {e}")
+        return None
 
-st.divider()
-st.caption("Developed by Abhishek Jha | Powered by Cosine Similarity & Mean-Centering")
+# --- Main Logic ---
+st.title("🎯 Pro Recommendation Engine")
+st.sidebar.header("Data Settings")
+
+github_url = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
+uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
+
+df = load_data(uploaded_file, github_url)
+
+if df is not None:
+    # 1. Prepare Data
+    with st.spinner("Building Similarity Matrix..."):
+        pivot = df.pivot_table(index='user_id', columns='item_id', values='rating')
+        user_sim = model.compute_similarity(pivot, target="user")
+
+    # 2. UI Layout
+    left_col, right_col = st.columns([1, 2])
+
+    with left_col:
+        st.subheader("User Selection")
+        user_id = st.selectbox("Pick a User to Recommend For:", pivot.index)
+        num_recs = st.slider("Number of results:", 1, 10, 5)
+        
+        # Show user stats
+        history = df[df['user_id'] == user_id]
+        st.metric("Items Rated", len(history))
+        with st.expander("Show Rating History"):
+            st.dataframe(history[['item_id', 'rating']], use_container_width=True)
+
+    with right_col:
+        st.subheader("Top Picks for You")
+        if st.button(f"Generate Recommendations"):
+            with st.spinner("Analyzing neighbor preferences..."):
+                recs = model.get_recommendations(user_id, pivot, user_sim, n=num_recs)
+                
+                if recs:
+                    rec_df = pd.DataFrame(recs, columns=['Product Name', 'Predicted Rating'])
+                    st.table(rec_df)
+                    st.success("Calculated based on similar user behavior.")
+                else:
+                    st.info("No new items found to recommend for this user.")
+
+else:
+    st.warning("Please upload a dataset or check your internet connection to load the default data.")
+
+st.markdown("---")
+st.caption("Developed by Abhishek Jha | Collaborative Filtering Engine v2.0")

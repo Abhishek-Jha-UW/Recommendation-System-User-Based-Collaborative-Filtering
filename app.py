@@ -6,11 +6,26 @@ st.set_page_config(page_title="AI Recommender Studio", layout="wide", page_icon=
 
 # --- Sample Data for Demonstration ---
 def load_sample_data():
-    return pd.DataFrame({
-        'User': ['Alice','Alice','Bob','Bob','Charlie','Charlie','David','David','Eve','Eve','Frank'],
-        'Item': ['Elden Ring','Halo','Elden Ring','Tetris','Halo','FIFA','FIFA','COD','Elden Ring','Halo','Halo'],
-        'Rating': [5, 4, 5, 3, 4, 5, 4, 2, 5, 5, 4]
-    })
+    # Expanded dataset: 20 users, 10 items, varied ratings (1-5)
+    data = {
+        'User': [
+            'Alice','Alice','Alice','Bob','Bob','Bob','Charlie','Charlie','Charlie','David','David',
+            'Eve','Eve','Eve','Frank','Frank','Grace','Grace','Heidi','Heidi','Ivan','Ivan',
+            'Judy','Judy','Mallory','Mallory','Niaj','Niaj','Olivia','Olivia','Peggy','Peggy',
+            'Sybil','Sybil','Trent','Trent','Victor','Victor','Walter','Walter'
+        ],
+        'Item': [
+            'Elden Ring','Halo','Zelda','Elden Ring','Tetris','COD','Halo','FIFA','Minecraft',
+            'COD','FIFA','Elden Ring','Halo','Zelda','Halo','Minecraft','Zelda','Mario Kart',
+            'Elden Ring','Mario Kart','FIFA','COD','Zelda','Mario Kart','Tetris','Minecraft',
+            'Halo','COD','Elden Ring','Zelda','FIFA','Mario Kart','Tetris','Halo',
+            'Zelda','COD','Elden Ring','FIFA','Minecraft','Mario Kart'
+        ],
+        'Rating': [
+            5,4,5,5,3,2,4,5,4,4,5,5,5,4,4,5,5,5,5,4,2,3,4,5,3,4,4,5,5,5,2,5,3,4,5,2,5,4,5,5
+        ]
+    }
+    return pd.DataFrame(data)
 
 # --- Sidebar Configuration ---
 with st.sidebar:

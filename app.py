@@ -1,77 +1,92 @@
 import streamlit as st
 import pandas as pd
 from model import RecommenderEngine
-import io
 
-# --- Page Setup ---
-st.set_page_config(page_title="AI Discovery Engine", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="AI Recommender Studio", layout="wide", page_icon="📊")
 
-# --- Default Sample Data (Internal) ---
-def get_sample_data():
-    data = {
-        'user_id': ['User_A', 'User_A', 'User_B', 'User_C', 'User_C', 'User_D', 'User_E', 'User_E'],
-        'item_name': ['Elden Ring', 'Halo', 'Elden Ring', 'FIFA 24', 'Halo', 'Elden Ring', 'FIFA 24', 'Zelda'],
-        'rating': [5, 4, 5, 2, 5, 4, 5, 5]
-    }
-    return pd.DataFrame(data)
+# --- Sample Data for Demonstration ---
+def load_sample_data():
+    return pd.DataFrame({
+        'User': ['Alice','Alice','Bob','Bob','Charlie','Charlie','David','David','Eve','Eve','Frank'],
+        'Item': ['Elden Ring','Halo','Elden Ring','Tetris','Halo','FIFA','FIFA','COD','Elden Ring','Halo','Halo'],
+        'Rating': [5, 4, 5, 3, 4, 5, 4, 2, 5, 5, 4]
+    })
 
-# --- UI Header ---
-st.title("🚀 AI Product Recommender")
-st.markdown("Upload your data or use our **Sample Mode** to see the engine in action.")
-
-# --- Sidebar: Data Controls ---
+# --- Sidebar Configuration ---
 with st.sidebar:
-    st.header("1. Data Input")
-    mode = st.radio("Choose Data Source:", ["Use Sample Data", "Upload My Own"])
+    st.header("⚙️ Control Panel")
     
-    if mode == "Upload My Own":
-        uploaded_file = st.file_uploader("Upload CSV", type="csv")
-        if uploaded_file:
-            df = pd.read_csv(uploaded_file)
+    # Strategy Selector
+    strategy = st.radio(
+        "Recommendation Strategy:",
+        ["User-Based CF", "Item-Based CF", "Market Basket Analysis"]
+    )
+    
+    st.divider()
+    
+    # Data Source Selector
+    data_option = st.selectbox("Data Source:", ["Use Built-in Sample", "Upload My Own CSV"])
+    
+    if data_option == "Upload My Own CSV":
+        file = st.file_uploader("Upload CSV", type="csv")
+        if file:
+            df = pd.read_csv(file)
         else:
-            st.info("Awaiting file...")
+            st.info("Please upload a CSV file to proceed.")
             st.stop()
     else:
-        df = get_sample_data()
-        st.success("Loaded internal sample dataset.")
+        df = load_sample_data()
+        st.success("Sample data loaded!")
 
-    st.divider()
-    st.header("2. Get Template")
-    # Create template for user download
-    template_df = pd.DataFrame(columns=['user_id', 'item_id', 'rating'])
-    csv = template_df.to_csv(index=False).encode('utf-8')
-    st.download_button("Download CSV Template", data=csv, file_name="template.csv", mime="text/csv")
+    # Template Download
+    template = pd.DataFrame(columns=['user_id', 'item_id', 'rating']).to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download CSV Template", data=template, file_name="template.csv")
 
-# --- Main Logic ---
+# --- Main App Interface ---
+st.title("🎯 AI Recommendation Engine")
+st.markdown(f"Currently using: **{strategy}**")
+
+# Initialize Engine
 engine = RecommenderEngine(df)
-engine.build_similarity()
 
+# UI Layout
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.subheader("Configuration")
-    selected_user = st.selectbox("Select a User", df.iloc[:, 0].unique())
-    num_recs = st.number_input("Recommendations count", 1, 10, 3)
+    st.subheader("Selection")
+    users = df.iloc[:, 0].unique()
+    selected_user = st.selectbox("Target User:", users)
+    num_recs = st.slider("Results count:", 1, 10, 5)
     
-    with st.expander("View Training Data"):
+    with st.expander("View Raw Data"):
         st.dataframe(df, use_container_width=True)
 
 with col2:
-    st.subheader("Your Personalized Recommendations")
-    if st.button("Generate Predictions"):
-        recs = engine.get_user_recommendations(selected_user, n=num_recs)
-        
-        if not recs.empty:
-            # Create a nice display table
-            results_df = pd.DataFrame({
-                "Product/Item": recs.index,
-                "Match Score": [f"{round(val * 20, 1)}%" for val in recs.values] 
-            })
-            st.table(results_df)
-            st.balloons()
-        else:
-            st.warning("Not enough data for this specific user. Try a different user!")
+    st.subheader("Generated Recommendations")
+    
+    if st.button(f"Run {strategy}"):
+        with st.spinner("Processing math..."):
+            if strategy == "User-Based CF":
+                recs = engine.get_user_based(selected_user, n=num_recs)
+                note = "Logic: Finding people who rate items similarly to you."
+            elif strategy == "Item-Based CF":
+                recs = engine.get_item_based(selected_user, n=num_recs)
+                note = "Logic: Finding items that are similar to what you've liked."
+            else:
+                recs = engine.get_market_basket(selected_user, n=num_recs)
+                note = "Logic: People who bought what you bought also picked these."
 
-# --- Footer ---
+            if not recs.empty:
+                st.info(note)
+                # Convert results to a clean table
+                res_df = pd.DataFrame({
+                    "Recommended Item": recs.index,
+                    "Strength Score": recs.values.round(2)
+                })
+                st.table(res_df)
+                st.balloons()
+            else:
+                st.warning("Not enough data to find recommendations for this user.")
+
 st.divider()
-st.caption("Custom Engine built by Abhishek Jha | No External API required")
+st.caption("Developed by Abhishek Jha | Collaborative Filtering & Association Rules Engine")

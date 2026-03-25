@@ -4,12 +4,10 @@ import urllib.request
 import io
 import model  # Ensure model.py is in the same folder
 
-# --- Page Config ---
 st.set_page_config(page_title="Game Recommender AI", layout="wide")
 
 @st.cache_data
 def load_data(uploaded_file, url):
-    """Loads data from upload or GitHub URL."""
     try:
         if uploaded_file is not None:
             if uploaded_file.name.endswith('.csv'):
@@ -17,28 +15,29 @@ def load_data(uploaded_file, url):
             else:
                 df = pd.read_excel(uploaded_file)
         else:
-            # Revised Request block
+            # Adding a timeout and specific error handling for the URL
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req) as response:
-                # Read the bytes and decode
+            with urllib.request.urlopen(req, timeout=10) as response:
                 data = response.read()
                 df = pd.read_csv(io.BytesIO(data))
         
-        # Mapping columns: We assume the first 3 columns are User, Item, Rating
-        # This prevents errors if the CSV headers don't match exactly
+        # Take only the first 3 columns to avoid structure errors
         df = df.iloc[:, :3] 
         df.columns = ['user_id', 'item_id', 'rating']
         return df
+    except urllib.error.HTTPError as e:
+        st.error(f"**GitHub Error {e.code}:** The file was not found at the URL provided. Please verify the link below.")
+        st.code(url)
+        return None
     except Exception as e:
-        st.error(f"Failed to load data: {e}")
+        st.error(f"**Loading Error:** {e}")
         return None
 
-# --- Main Logic ---
+# --- Configuration ---
 st.title("🎯 Pro Recommendation Engine")
 st.sidebar.header("Data Settings")
 
-# IMPORTANT: Ensure this URL is exactly correct. 
-# Check if 'games_sample.csv' is in the main branch or a different one.
+# CHECK THIS URL: Ensure 'main' is the correct branch name for your repo
 github_url = "https://raw.githubusercontent.com/Abhishek-Jha-UW/Recommendation-System-User-Based-Collaborative-Filtering/main/games_sample.csv"
 
 uploaded_file = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx"])
@@ -47,8 +46,8 @@ df = load_data(uploaded_file, github_url)
 
 if df is not None:
     # Build Pivot and Similarity
-    with st.spinner("Building Similarity Matrix..."):
-        # We drop duplicates to ensure pivot_table doesn't error out
+    with st.spinner("Processing Data..."):
+        # Removing duplicates is critical for the .pivot() function to work
         df_clean = df.drop_duplicates(subset=['user_id', 'item_id'])
         pivot = df_clean.pivot(index='user_id', columns='item_id', values='rating')
         user_sim = model.compute_similarity(pivot, target="user")
@@ -57,23 +56,27 @@ if df is not None:
 
     with left_col:
         st.subheader("User Selection")
-        user_id = st.selectbox("Pick a User:", pivot.index)
+        user_id = st.selectbox("Select User ID:", pivot.index)
         num_recs = st.slider("Number of results:", 1, 10, 5)
         
         history = df[df['user_id'] == user_id]
-        st.metric("Items Rated", len(history))
-        with st.expander("Show Rating History"):
+        st.metric("Total User Ratings", len(history))
+        with st.expander("View Rated Items"):
             st.dataframe(history[['item_id', 'rating']], use_container_width=True)
 
     with right_col:
-        st.subheader("Top Picks for You")
+        st.subheader("Top Recommendations")
         if st.button("Generate Recommendations"):
-            with st.spinner("Analyzing preferences..."):
+            with st.spinner("Calculating mathematical similarities..."):
                 recs = model.get_recommendations(user_id, pivot, user_sim, n=num_recs)
                 if recs:
                     rec_df = pd.DataFrame(recs, columns=['Product Name', 'Predicted Rating'])
-                    st.table(rec_df)
+                    # Visual styling for the table
+                    st.dataframe(rec_df.style.format({"Predicted Rating": "{:.2f}"}), use_container_width=True)
                 else:
-                    st.info("No recommendations found.")
+                    st.info("No items left to recommend (User may have rated everything).")
 else:
-    st.warning("Could not reach the dataset. Please upload your own CSV file in the sidebar.")
+    st.info("Waiting for data... If the GitHub link is failing, try uploading the CSV file manually in the sidebar.")
+
+st.divider()
+st.caption("Developed by Abhishek Jha | Build 2026.03")
